@@ -1,0 +1,21 @@
+name: Probe F1 live timing
+on:
+  push:
+    branches: [main]
+    paths: ['scripts/f1probe.mjs', '.github/workflows/f1probe.yml']
+permissions:
+  contents: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save ws@8.18.0
+      - run: node scripts/f1probe.mjs
+      - run: |
+          cd out && git init -q -b probe && git add f1probe.txt
+          git -c user.name=gha -c user.email=gha@users.noreply.github.com commit -qm probe
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" probe

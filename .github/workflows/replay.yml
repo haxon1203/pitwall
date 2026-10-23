@@ -38,6 +38,8 @@ jobs:
       - name: Publish to replays branch
         run: |
           cd replays
+          if [ ! -f .built ]; then echo 'No new replays'; exit 0; fi
+          rm .built
           git init -q -b replays
           git add -A
           git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" commit -qm "Update replays"

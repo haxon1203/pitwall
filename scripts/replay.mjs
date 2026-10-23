@@ -58,6 +58,7 @@ for (const old of index.replays.splice(KEEP)) {
 }
 index.at = Date.now();
 writeFileSync(indexPath, JSON.stringify(index));
+if (index.replays.some(r => !have.has(r.key))) writeFileSync(`${OUT}/.built`, '1');   // tells the workflow to publish
 
 async function build(s) {
   const k = s.session_key;

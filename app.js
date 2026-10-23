@@ -66,6 +66,8 @@ function setTab(t) {
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t));
   document.querySelectorAll('.view').forEach(v => v.hidden = v.dataset.view !== t);
   $('#scroller').scrollTop = 0;
+  if (t !== 'live' && typeof pauseMap === 'function') pauseMap();
+  if (t === 'live' && typeof sizeMap === 'function') requestAnimationFrame(() => { sizeMap(); drawMap(); });
 }
 document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
 document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
@@ -89,6 +91,7 @@ async function loadLive() {
   }
   if (!S.live || !(j.at < S.live.at)) { S.live = j; store.set('live', j); }
   renderWeekend(); renderTiming(); renderCommentary();
+  if (M.index) renderMapHead();
 }
 
 // ---------- weekend ----------
@@ -200,6 +203,229 @@ $('#live').addEventListener('click', e => {
   S.session = b.dataset.ses; renderTiming();
 });
 
+// ---------- track map replay (OpenF1 data, built after each session by .github/workflows/replay.yml) ----------
+const REPLAYS = `https://raw.githubusercontent.com/${REPO}/replays/`;
+const M = { index: null, key: store.get('replayKey'), data: null, t: 0, playing: false, speed: 16, sel: null, last: 0, raf: 0 };
+
+function decodeReplay(d) {
+  const N = d.seconds;
+  d.xy = {};
+  for (const [num, runs] of Object.entries(d.pos)) {
+    const X = new Float32Array(N).fill(NaN), Y = new Float32Array(N).fill(NaN);
+    for (const run of runs) {
+      let i = run[0], x = run[1], y = run[2];
+      X[i] = x; Y[i] = y;
+      for (let k = 3; k < run.length; k += 2) { i++; x += run[k]; y += run[k + 1]; X[i] = x; Y[i] = y; }
+    }
+    d.xy[num] = [X, Y];
+  }
+  // Per-driver timelines for the leaderboard
+  d.byDriver = {};
+  const D = n => (d.byDriver[n] ||= { order: [], laps: [], ints: [] });
+  for (const [t, n, p] of d.order) D(n).order.push([t, p]);
+  for (const [n, lap, t, dur, out] of d.laps) D(n).laps.push([t, lap, dur, out]);
+  for (const [t, n, g, i] of d.ints) D(n).ints.push([t, g, i]);
+  for (const v of Object.values(d.byDriver)) v.laps.sort((a, b) => a[0] - b[0]);
+  const lap1 = d.laps.filter(l => l[1] === 1).map(l => l[2]);
+  d.firstLap = lap1.length ? Math.min(...lap1) : 0;
+  d.totalLaps = Math.max(0, ...d.laps.map(l => l[1]));
+  // Map bounds from the track outline plus every recorded point
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const add = (x, y) => { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; };
+  for (const [x, y] of d.track) add(x, y);
+  if (!d.track.length) for (const [X, Y] of Object.values(d.xy)) for (let i = 0; i < N; i += 10) if (!isNaN(X[i])) add(X[i], Y[i]);
+  d.bounds = { minX, maxX, minY, maxY };
+  return d;
+}
+// latest entry at or before t in a [t, ...] array sorted by time
+function at(arr, t) {
+  let lo = 0, hi = arr.length - 1, r = null;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (arr[m][0] <= t) { r = arr[m]; lo = m + 1; } else hi = m - 1; }
+  return r;
+}
+
+async function loadReplays() {
+  const idx = await getJSON(REPLAYS + 'index.json?t=' + Math.floor(Date.now() / 120e3));
+  M.index = idx.replays || [];
+  if (!M.index.length) { renderMapHead(); return; }
+  const want = M.index.find(r => r.key === M.key) ? M.key : M.index[0].key;
+  if (!M.data || M.data.session.key !== want) await openReplay(want);
+  else renderMapHead();
+}
+async function openReplay(key) {
+  M.key = key; store.set('replayKey', key);
+  pauseMap();
+  $('#mapHead').innerHTML = '<div class="note">Loading replay…</div>';
+  try {
+    M.data = decodeReplay(await getJSON(REPLAYS + `replay-${key}.json`, { timeout: 60000 }));
+  } catch {
+    $('#mapHead').innerHTML = '<div class="err">Could not load this replay. Tap refresh to try again.</div>';
+    return;
+  }
+  const d = M.data;
+  M.t = Math.max(0, d.firstLap - 15);
+  $('#mapSeek').max = d.seconds - 1;
+  $('#mapCtl').hidden = false;
+  M.sel = null;
+  renderMapHead(); sizeMap(); drawMap();
+}
+
+function renderMapHead() {
+  const chipsEl = $('#mapChips'), head = $('#mapHead');
+  const list = M.index || [];
+  const cur = list.find(r => r.key === M.key) || list[0];
+  // Sessions from the same weekend as the one showing
+  const same = cur ? list.filter(r => r.meeting === cur.meeting).sort((a, b) => a.start - b.start) : [];
+  chipsEl.innerHTML = same.map(r => `<button class="chip" data-replay="${r.key}" aria-pressed="${r.key === M.key}">${esc(replayShort(r.name))}</button>`).join('') +
+    (list.some(r => r.meeting !== cur?.meeting) ? `<button class="chip" data-replay-older="1">Earlier</button>` : '');
+  const liveNow = S.live?.weekend?.sessions.find(s => s.isLive);
+  const liveNote = liveNow ? `<div class="live">${esc(liveNow.name)} is live now. Car positions are released for free when it ends, and its replay appears here a few minutes later. Live order is in the timing table below.</div>` : '';
+  if (!cur) { head.innerHTML = liveNote + '<div class="note">Replays appear here a few minutes after each session ends.</div>'; return; }
+  head.innerHTML = `${liveNote}<div class="t">${esc(cur.meeting)} · ${esc(cur.name)}</div><div class="s">Replay · ${fmtDay(cur.start)} · tap a driver to follow them</div>`;
+}
+const replayShort = n => ({ 'Practice 1': 'FP1', 'Practice 2': 'FP2', 'Practice 3': 'FP3', 'Sprint Qualifying': 'Sprint Quali', 'Sprint Shootout': 'Sprint Quali' }[n] || n);
+$('#mapChips').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.replay) openReplay(+b.dataset.replay);
+  else if (b.dataset.replayOlder) {
+    const cur = M.index.find(r => r.key === M.key);
+    const older = M.index.find(r => r.meeting !== cur?.meeting && r.start < (cur?.start ?? Infinity)) || M.index.find(r => r.meeting !== cur?.meeting);
+    if (older) openReplay(older.key);
+  }
+});
+
+// Canvas
+const cv = $('#mapCanvas'), cx = cv.getContext('2d');
+let view = null;
+function sizeMap() {
+  const d = M.data; if (!d) return;
+  const w = cv.parentNode.clientWidth - 20;
+  const b = d.bounds, bw = b.maxX - b.minX || 1, bh = b.maxY - b.minY || 1;
+  const h = Math.min(Math.max(w * bh / bw, w * 0.55), w * 1.1);
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr; cv.style.height = h + 'px';
+  const pad = 18, sc = Math.min((w - pad * 2) / bw, (h - pad * 2) / bh);
+  view = { dpr, sc, ox: (w - bw * sc) / 2 - b.minX * sc, oy: (h - bh * sc) / 2 + b.maxY * sc, w, h };
+}
+const px = x => view.ox + x * view.sc;
+const py = y => view.oy - y * view.sc;          // flip: OpenF1 y grows upwards
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function drawMap() {
+  const d = M.data; if (!d || !view) return;
+  const { dpr, w, h } = view;
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx.clearRect(0, 0, w, h);
+  // track
+  if (d.track.length) {
+    cx.lineJoin = cx.lineCap = 'round';
+    cx.beginPath(); d.track.forEach(([x, y], i) => i ? cx.lineTo(px(x), py(y)) : cx.moveTo(px(x), py(y))); cx.closePath();
+    cx.strokeStyle = css('--line'); cx.lineWidth = 9; cx.stroke();
+    cx.strokeStyle = css('--raised'); cx.lineWidth = 5; cx.stroke();
+    const [sx, sy] = d.track[0];
+    cx.fillStyle = css('--fg'); cx.fillRect(px(sx) - 2, py(sy) - 7, 4, 14);
+  }
+  // cars, interpolated between whole seconds
+  const i0 = Math.floor(M.t), f = M.t - i0;
+  const order = boardAt(M.t);
+  const drawn = [];
+  for (const r of [...order].reverse()) {           // leader drawn last, on top
+    const xy = d.xy[r.num]; if (!xy) continue;
+    const [X, Y] = xy;
+    let x = X[i0], y = Y[i0];
+    if (isNaN(x)) continue;
+    if (i0 + 1 < d.seconds && !isNaN(X[i0 + 1])) { x += (X[i0 + 1] - x) * f; y += (Y[i0 + 1] - y) * f; }
+    drawn.push({ r, x: px(x), y: py(y) });
+  }
+  const fg = css('--fg'), bg = css('--surface');
+  for (const { r, x, y } of drawn) {
+    const sel = M.sel === r.num;
+    cx.beginPath(); cx.arc(x, y, sel ? 8 : 5.5, 0, Math.PI * 2);
+    cx.fillStyle = r.color; cx.fill();
+    cx.lineWidth = sel ? 2.5 : 1.5; cx.strokeStyle = sel ? fg : bg; cx.stroke();
+    if (sel || r.pos <= 3 || drawn.length <= 6) {
+      cx.font = `700 ${sel ? 13 : 11}px "Barlow Condensed", Arial, sans-serif`;
+      cx.lineWidth = 3; cx.strokeStyle = bg; cx.strokeText(r.abbr, x + 8, y - 6);
+      cx.fillStyle = fg; cx.fillText(r.abbr, x + 8, y - 6);
+    }
+  }
+  renderBoard(order);
+}
+
+function boardAt(t) {
+  const d = M.data, isRace = /race/i.test(d.session.type);
+  const rows = d.drivers.map(dr => {
+    const b = d.byDriver[dr.num] || { order: [], laps: [], ints: [] };
+    const p = at(b.order, t);
+    const lap = at(b.laps, t);
+    let best = null, lastDone = null;
+    for (const l of b.laps) { if (l[2] && l[0] + l[2] <= t) { lastDone = l; if (!l[3] && (best == null || l[2] < best)) best = l[2]; } }
+    const iv = isRace ? at(b.ints, t) : null;
+    return { num: dr.num, abbr: dr.abbr, color: dr.color || teamColor(dr.team?.toLowerCase().replace(/\s+/g, '-')), pos: p ? p[1] : 99, lap: lap ? lap[1] : 0, best, last: lastDone?.[2] ?? null, gap: iv?.[1], int: iv?.[2] };
+  });
+  rows.sort((a, b) => a.pos - b.pos);
+  return rows;
+}
+const fmtLapS = s => s == null ? '' : (s >= 60 ? Math.floor(s / 60) + ':' + (s % 60).toFixed(3).padStart(6, '0') : s.toFixed(3));
+let boardKey = '';
+function renderBoard(rows) {
+  const d = M.data, isRace = /race/i.test(d.session.type);
+  const fastest = Math.min(...rows.map(r => r.best ?? Infinity));
+  const html = rows.map((r, i) => {
+    let g;
+    if (isRace) g = i === 0 ? (r.lap ? 'Lap ' + r.lap : '') : r.gap == null ? '' : typeof r.gap === 'number' ? '+' + r.gap.toFixed(1) : esc(r.gap);
+    else g = r.best ? `<span style="${r.best === fastest ? 'color:var(--purple)' : ''}">${fmtLapS(r.best)}</span>` : '';
+    return `<button class="mb ${M.sel === r.num ? 'sel' : ''}" data-num="${r.num}"><span class="p">${r.pos === 99 ? '–' : r.pos}</span><span class="c" style="background:${r.color}"></span><b>${esc(r.abbr)}</b><span class="g">${g}</span></button>`;
+  }).join('');
+  if (html !== boardKey) { $('#mapBoard').innerHTML = html; boardKey = html; }
+  // time + flag
+  const t = M.t, el = Math.max(0, t - d.firstLap);
+  const lead = rows[0];
+  const hh = n => String(Math.floor(n)).padStart(2, '0');
+  $('#mapTime').innerHTML = `<span>${isRace && lead?.lap ? `Lap ${lead.lap}${d.totalLaps ? ' of ' + d.totalLaps : ''}` : 'Session time'} · ${hh(el / 3600)}:${hh(el % 3600 / 60)}:${hh(el % 60)}</span><span>${fmtTime(d.t0 + t * 1000)} local</span>`;
+  $('#mapSeek').value = Math.floor(t);
+  const flag = flagAt(t);
+  const fe = $('#mapFlag');
+  fe.hidden = !flag; if (flag) { fe.className = 'mapflag ' + flag.cls; fe.textContent = flag.text; }
+}
+function flagAt(t) {
+  let s = null;
+  for (const [mt, cat, flag, msg, , scope] of M.data.rc) {
+    if (mt > t) break;
+    const m = (msg || '').toUpperCase();
+    if (cat === 'SafetyCar') {
+      if (m.includes('VIRTUAL SAFETY CAR DEPLOYED')) s = { cls: 'vsc', text: 'Virtual Safety Car' };
+      else if (m.includes('SAFETY CAR DEPLOYED')) s = { cls: 'sc', text: 'Safety Car' };
+    } else if (cat === 'Flag' && (scope === 'Track' || !scope)) {
+      if (flag === 'RED') s = { cls: 'red', text: 'Red flag' };
+      else if (flag === 'GREEN' || flag === 'CLEAR') s = null;
+      else if (flag === 'CHEQUERED') s = { cls: 'chequered', text: 'Chequered flag' };
+    }
+  }
+  return s;
+}
+
+// Playback
+function tick(now) {
+  if (!M.playing) return;
+  const dt = M.last ? (now - M.last) / 1000 : 0;
+  M.last = now;
+  M.t = Math.min(M.data.seconds - 1.001, M.t + dt * M.speed);
+  drawMap();
+  if (M.t >= M.data.seconds - 1.001) { pauseMap(); return; }
+  M.raf = requestAnimationFrame(tick);
+}
+function playMap() { if (!M.data) return; M.playing = true; M.last = 0; $('#mapPlay').classList.add('playing'); $('#mapPlay').setAttribute('aria-label', 'Pause'); M.raf = requestAnimationFrame(tick); }
+function pauseMap() { M.playing = false; cancelAnimationFrame(M.raf); $('#mapPlay').classList.remove('playing'); $('#mapPlay').setAttribute('aria-label', 'Play'); }
+$('#mapPlay').addEventListener('click', () => M.playing ? pauseMap() : playMap());
+$('#mapSpeed').addEventListener('change', e => { M.speed = +e.target.value; });
+$('#mapSeek').addEventListener('input', e => { M.t = +e.target.value; drawMap(); });
+$('#mapBoard').addEventListener('click', e => {
+  const b = e.target.closest('[data-num]'); if (!b) return;
+  M.sel = M.sel === +b.dataset.num ? null : +b.dataset.num; boardKey = ''; drawMap();
+});
+window.addEventListener('resize', () => { sizeMap(); drawMap(); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', drawMap);
+
 // ---------- BBC live commentary ----------
 function renderCommentary() {
   const el = $('#rc'), c = S.live?.commentary;
@@ -291,7 +517,7 @@ function stamp(ok) {
 let lastFull = 0;
 async function refreshAll() {
   const btn = $('#refresh'); btn.classList.add('spin');
-  const res = await Promise.allSettled([loadBBC(), loadLive()]);
+  const res = await Promise.allSettled([loadBBC(), loadLive(), loadReplays()]);
   btn.classList.remove('spin');
   lastFull = Date.now();
   S.error = res.every(r => r.status === 'rejected') ? 'Could not load data from BBC Sport. Tap refresh to try again.' : null;

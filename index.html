@@ -94,6 +94,38 @@ h2.sec{font-family:var(--display);font-weight:700;text-transform:uppercase;lette
 .now p{margin:0;font-size:13px;color:var(--muted);line-height:1.45}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 14px;border-radius:10px;background:var(--fg);color:var(--bg);font-weight:600;font-size:14px;text-decoration:none}
 .newsAge{font-size:12px;color:var(--muted)}
+/* Track map */
+.map{overflow:hidden}
+.mapchips{padding:12px 14px 0}
+.maphead{padding:10px 14px 4px;display:flex;flex-direction:column;gap:4px}
+.maphead .t{font-family:var(--display);font-weight:700;font-size:20px;text-transform:uppercase;line-height:1.05}
+.maphead .s{font-size:12px;color:var(--muted)}
+.maphead .live{font-size:12px;color:var(--fg);background:var(--raised);border-radius:8px;padding:8px 10px;line-height:1.4}
+.mapwrap{position:relative;padding:4px 10px}
+#mapCanvas{display:block;width:100%;height:auto;touch-action:manipulation}
+.mapflag{position:absolute;top:8px;left:14px;font-family:var(--display);font-weight:700;font-size:14px;letter-spacing:.05em;text-transform:uppercase;padding:4px 8px;border-radius:6px}
+.mapflag.sc,.mapflag.yellow{background:var(--yellow);color:#141414}
+.mapflag.vsc{background:var(--vsc);color:#141414}
+.mapflag.red{background:var(--red);color:#fff}
+.mapflag.chequered{background:var(--fg);color:var(--bg)}
+.mapctl{display:flex;align-items:center;gap:10px;padding:6px 14px}
+.playbtn{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:var(--fg);color:var(--bg);flex:none}
+.playbtn svg{width:18px;height:18px}
+.playbtn .i-pause{display:none}
+.playbtn.playing .i-pause{display:block}
+.playbtn.playing .i-play{display:none}
+#mapSeek{flex:1;min-width:0;accent-color:var(--accent)}
+#mapSpeed{font:inherit;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--fg)}
+.maptime{padding:0 14px 8px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.mapboard{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-top:1px solid var(--line)}
+.mb{display:grid;grid-template-columns:22px 3px minmax(0,1fr) auto;gap:6px;align-items:center;padding:6px 10px;font-size:13px;border-bottom:1px solid var(--line);text-align:left}
+.mb:nth-child(odd){border-right:1px solid var(--line)}
+.mb .p{font-family:var(--mono);font-weight:700;text-align:right;font-size:12px}
+.mb .c{width:3px;height:18px;border-radius:2px}
+.mb b{font-family:var(--display);font-weight:700;font-size:15px;letter-spacing:.03em}
+.mb .g{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap}
+.mb.sel{background:var(--raised)}
+.mb.out{opacity:.5}
 /* Timing extras */
 .sesschips{padding:12px 14px 0}
 .sesschips .chip{display:inline-flex;align-items:center}
@@ -223,6 +255,24 @@ nav.tabs .livedot{position:absolute;top:10px;right:calc(50% - 18px);width:8px;he
   <!-- LIVE -->
   <section class="view" id="v-live" data-view="live">
     <div class="card weekend" id="weekend"><div class="skel" style="width:40%"></div><div class="skel" style="width:70%;height:28px"></div><div class="skel"></div></div>
+    <div>
+      <h2 class="sec">Track map</h2>
+      <div class="card map" id="map">
+        <div class="mapchips chips" id="mapChips"></div>
+        <div class="maphead" id="mapHead"><div class="note">Loading track replays…</div></div>
+        <div class="mapwrap"><canvas id="mapCanvas" aria-label="Track map with car positions"></canvas><div class="mapflag" id="mapFlag" hidden></div></div>
+        <div class="mapctl" id="mapCtl" hidden>
+          <button class="playbtn" id="mapPlay" aria-label="Play">
+            <svg class="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>
+            <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+          </button>
+          <input type="range" id="mapSeek" min="0" max="100" value="0" step="1" aria-label="Replay position">
+          <select id="mapSpeed" aria-label="Replay speed"><option value="1">1×</option><option value="4">4×</option><option value="16" selected>16×</option><option value="60">60×</option></select>
+        </div>
+        <div class="maptime mono" id="mapTime"></div>
+        <div class="mapboard" id="mapBoard"></div>
+      </div>
+    </div>
     <div>
       <h2 class="sec" id="liveHead">Live timing</h2>
       <div class="card" id="live"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>

@@ -1,0 +1,10 @@
+browser /static/StreamingStatus.json 403 cloudfront block
+browser /signalr/negotiate 403 cloudfront block
+browser /signalrcore/negotiate 403 cloudfront block
+besthttp /static/StreamingStatus.json 403 cloudfront block
+besthttp /signalr/negotiate 403 cloudfront block
+besthttp /signalrcore/negotiate 403 cloudfront block
+OPENF1 /sessions?session_key=latest 401 214 {"detail":"Live F1 session in progress. Global API access (including past sessions) is restricted to authenticated users until the session ends. Get an API key here: https://buy.stripe.com/eVqcN41BPekP0iIalBcEw02"}
+OPENF1 /location?session_key=latest&date>2026-10-23T21:43:03.469Z 401 214 {"detail":"Live F1 session in progress. Global API access (including past sessions) is restricted to authenticated users until the session ends. Get an API key here: https://buy.stripe.com/eVqcN41BPekP0iIalBcEw02"}
+OPENF1 /position?session_key=latest&date>2026-10-23T21:34:03.469Z 401 214 {"detail":"Live F1 session in progress. Global API access (including past sessions) is restricted to authenticated users until the session ends. Get an API key here: https://buy.stripe.com/eVqcN41BPekP0iIalBcEw02"}
+OPENF1 /intervals?session_key=latest&date>2026-10-23T21:43:03.469Z 401 214 {"detail":"Live F1 session in progress. Global API access (including past sessions) is restricted to authenticated users until the session ends. Get an API key here: https://buy.stripe.com/eVqcN41BPekP0iIalBcEw02"}

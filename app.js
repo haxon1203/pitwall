@@ -12,7 +12,11 @@ const FEEDS = [
   { id: 'autosport', name: 'Autosport', url: 'https://www.autosport.com/rss/f1/news/' },
   { id: 'bbc', name: 'BBC Sport', url: 'https://feeds.bbci.co.uk/sport/formula1/rss.xml' },
   { id: 'therace', name: 'The Race', url: 'https://www.the-race.com/formula-1/feed/' },
+  { id: 'racefans', name: 'RaceFans', url: 'https://www.racefans.net/feed/' },
 ];
+// Collected every 15 minutes by .github/workflows/news.yml
+const NEWS_JSON = 'https://raw.githubusercontent.com/haxon1203/pitwall/data/news.json';
+const F1_LIVE_TIMING = 'https://www.formula1.com/en/timing/f1-live';
 
 const TEAM_COLORS = {
   red_bull: '#3671C6', ferrari: '#E8002D', mercedes: '#27F4D2', mclaren: '#FF8000',
@@ -93,7 +97,7 @@ function setTab(t) {
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t));
   document.querySelectorAll('.view').forEach(v => v.hidden = v.dataset.view !== t);
   document.getElementById('scroller').scrollTop = 0;
-  if (t === 'news' && (!S.news || Date.now() - S.news.at > 10 * 60e3)) loadNews();
+  if (t === 'news' && (!S.news || Date.now() - (S.news.checked || 0) > 5 * 60e3)) loadNews();
 }
 document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
 document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
@@ -167,6 +171,31 @@ function renderWeekend() {
     </div>
     <div class="muted" style="font-size:12px">Times shown in your local time zone.</div>`;
   $('#liveDot').hidden = !live && !(S.live && S.live.status === 'live');
+  renderNow();
+}
+
+// "Live now" card from the official schedule, shown when a session is running
+// but the free timing feed has no live positions yet.
+function scheduledLive() {
+  const race = currentRace(); if (!race) return null;
+  const now = Date.now();
+  const s = raceSessions(race).find(x => now >= x.start && now <= x.end);
+  return s ? { race, s } : null;
+}
+const hasLiveTiming = () => S.live?.status === 'live' && Object.keys(S.live.pos).length > 0;
+const mins = ms => { const m = Math.max(0, Math.round(ms / 60e3)); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`; };
+function renderNow() {
+  const el = $('#now'), cur = scheduledLive();
+  if (!cur || hasLiveTiming()) { el.hidden = true; el.innerHTML = ''; return; }
+  const { race, s } = cur;
+  el.hidden = false;
+  el.innerHTML = `
+    <div class="row"><span class="pill live"><span class="dot"></span>Live now</span><span class="muted">${esc(race.raceName)}</span></div>
+    <div class="title">${esc(s.name)}</div>
+    <div class="clock"><span>Running <b data-elapsed="${+s.start}">${mins(Date.now() - s.start)}</b></span><span>About <b data-remaining="${+s.end}">${mins(s.end - Date.now())}</b> left</span></div>
+    <div class="progress"><i data-progress="${+s.start}-${+s.end}" style="width:${Math.min(100, (Date.now() - s.start) / (s.end - s.start) * 100).toFixed(1)}%"></i></div>
+    <p>${S.live?.status === 'live' && S.liveError ? esc(S.liveError) : 'The free timing feed sends positions once the session ends, so the full times appear below shortly after the chequered flag.'} For lap-by-lap timing right now, use the official F1 live timing.</p>
+    <a class="btn" href="${F1_LIVE_TIMING}" target="_blank" rel="noopener">Open official F1 live timing</a>`;
 }
 
 function renderCalendar() {
@@ -372,6 +401,10 @@ function renderLive() {
   const ses = L.session, isRace = /race/i.test(ses.session_type);
   const start = new Date(ses.date_start);
   const meetingName = L.meeting?.meeting_name || ses.country_name;
+  const race = currentRace();
+  let thisWeekend = false;
+  if (race) { const ss = raceSessions(race); thisWeekend = +start >= ss[0].start - 86400e3 && +start <= +ss.at(-1).end + 86400e3; }
+  $('#liveHead').textContent = L.status === 'live' ? 'Live timing' : thisWeekend ? 'Latest session result' : 'Previous round result';
   const statusPill = L.status === 'live' ? '<span class="pill live"><span class="dot"></span>Live</span>'
     : L.status === 'finished' ? '<span class="pill done">Final</span>' : '<span class="pill next">Upcoming</span>';
 
@@ -476,13 +509,21 @@ let newsLoading = false;
 async function loadNews() {
   if (newsLoading) return; newsLoading = true;
   try {
-    const results = await Promise.allSettled(FEEDS.map(loadFeed));
-    const items = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
-    if (!items.length) throw new Error('no news');
-    const seen = new Set();
-    const list = items.filter(i => i.title && i.link && !seen.has(i.title.toLowerCase()) && seen.add(i.title.toLowerCase()))
-      .sort((a, b) => b.date - a.date).slice(0, 80);
-    S.news = { at: Date.now(), items: list };
+    let fresh = null;
+    try {
+      const j = await getJSON(NEWS_JSON + '?t=' + Math.floor(Date.now() / 60e3), { timeout: 10000 });
+      if (j.items?.length && Date.now() - j.at < 3 * 3600e3) fresh = j;
+    } catch {}
+    if (!fresh) {
+      // Backup: fetch the feeds from the phone if the collected file is missing or stale
+      const results = await Promise.allSettled(FEEDS.map(loadFeed));
+      const items = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+      if (!items.length) throw new Error('no news');
+      const seen = new Set();
+      fresh = { at: Date.now(), items: items.filter(i => i.title && i.link && !seen.has(i.title.toLowerCase()) && seen.add(i.title.toLowerCase()))
+        .sort((a, b) => b.date - a.date).slice(0, 120) };
+    }
+    S.news = { ...fresh, checked: Date.now() };
     store.set('news', S.news);
   } catch {
     if (!S.news) $('#news').innerHTML = '<div class="err">Could not load news right now. Tap refresh to try again.</div>';
@@ -495,12 +536,12 @@ function renderNews() {
   if (!S.news) return;
   const items = S.news.items.filter(i => S.newsSource === 'all' || i.source === S.newsSource);
   const name = id => FEEDS.find(f => f.id === id)?.name || '';
-  $('#news').innerHTML = items.length ? items.map(i => `
+  $('#news').innerHTML = `<div class="newsAge">${items.length} stories · collected ${ago(S.news.at)}</div>` + (items.length ? items.map(i => `
     <a class="card story ${i.img ? '' : 'noimg'}" href="${esc(i.link)}" target="_blank" rel="noopener">
       <div style="min-width:0"><h3>${esc(i.title)}</h3>${i.desc ? `<p>${esc(i.desc)}</p>` : ''}
         <div class="meta"><b>${esc(name(i.source))}</b><span>·</span><span>${i.date ? ago(i.date) : ''}</span></div></div>
       ${i.img ? `<img src="${esc(i.img)}" alt="" loading="lazy" onerror="this.remove();this.parentNode&&this.parentNode.classList.add('noimg')">` : ''}
-    </a>`).join('') : '<div class="note">No stories from this source right now.</div>';
+    </a>`).join('') : '<div class="note">No stories from this source right now.</div>');
 }
 $('#newsChips').addEventListener('click', e => {
   const b = e.target.closest('.chip'); if (!b) return;
@@ -537,6 +578,10 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && S.updatedAt && Date.now() - S.updatedAt > 60e3) refreshAll();
 });
 setInterval(() => {
+  const n = Date.now();
+  document.querySelectorAll('[data-elapsed]').forEach(el => el.textContent = mins(n - el.dataset.elapsed));
+  document.querySelectorAll('[data-remaining]').forEach(el => { if (n > +el.dataset.remaining) renderWeekend(); else el.textContent = mins(el.dataset.remaining - n); });
+  document.querySelectorAll('[data-progress]').forEach(el => { const [a, b] = el.dataset.progress.split('-').map(Number); el.style.width = Math.min(100, (n - a) / (b - a) * 100).toFixed(1) + '%'; });
   document.querySelectorAll('[data-countdown]').forEach(el => {
     const ms = +el.dataset.countdown - Date.now();
     if (ms <= 0) renderWeekend(); else el.textContent = countdown(ms);

@@ -249,56 +249,99 @@ function newLiveState(session) {
 const maxDate = (rows, cur) => rows.reduce((m, r) => (r.date > m ? r.date : m), cur || '');
 const since = (field, d) => d ? `&${field}>${encodeURIComponent(d)}` : '';
 
+// OpenF1 free tier allows ~3 requests/second, so calls go out one at a time with a gap,
+// and a "too many requests" answer is retried after a pause.
+let of1Chain = Promise.resolve();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function of1(path) {
+  const run = async () => {
+    for (let attempt = 0; ; attempt++) {
+      try { const j = await getJSON(OPENF1 + path); await sleep(400); return j; }
+      catch (e) {
+        if (e.status === 404) { await sleep(400); return []; }   // OpenF1 answers 404 when there are no rows
+        if (e.status !== 429 || attempt >= 3) { await sleep(400); throw e; }
+        await sleep(1500 * (attempt + 1));
+      }
+    }
+  };
+  const p = of1Chain.then(run, run);
+  of1Chain = p.catch(() => {});
+  return p;
+}
+const LOCKED_MSG = 'The free live timing feed is locked while a session is running. Positions appear here a few minutes after the chequered flag.';
+
+let liveLoading = false;
 async function loadLive() {
+  if (liveLoading) return; liveLoading = true;
+  try { await loadLiveInner(); } finally { liveLoading = false; }
+}
+async function loadLiveInner() {
   let session;
   try {
-    [session] = await getJSON(`${OPENF1}/sessions?session_key=latest`);
+    [session] = await of1(`/sessions?session_key=latest`);
   } catch (e) {
-    S.liveError = e.status === 401 || e.status === 403
-      ? 'The free live timing feed is locked while a session is running. Positions appear here a few minutes after the chequered flag.'
-      : 'Live timing is unavailable right now. Pull to refresh in a moment.';
+    S.liveError = e.status === 401 || e.status === 403 ? LOCKED_MSG : 'Live timing is unavailable right now. Tap refresh in a moment.';
     renderLive(); return;
   }
   if (!session) return;
   if (!S.live || S.live.key !== session.session_key) {
     S.live = newLiveState(session);
-    const [meeting] = await getJSON(`${OPENF1}/meetings?meeting_key=${session.meeting_key}`).catch(() => []);
+    const [meeting] = await of1(`/meetings?meeting_key=${session.meeting_key}`).catch(() => []);
     S.live.meeting = meeting;
   }
   const L = S.live, k = L.key;
   L.session = session;
   const now = Date.now(), start = Date.parse(session.date_start), end = Date.parse(session.date_end);
   L.status = now < start ? 'upcoming' : now <= end + 10 * 60e3 ? 'live' : 'finished';
+  if (L.status === 'upcoming' || L.complete) { renderLive(); renderWeekend(); return; }
 
+  const isRace = /race/i.test(session.session_type);
+  const step = async (fn) => { try { await fn(); return true; } catch (e) { if (e.status === 401 || e.status === 403) throw e; return false; } };
+  let ok = true;
   try {
-    const isRace = /race/i.test(session.session_type);
-    const lapFrom = Math.max(1, L.maxLap - 1);
-    const reqs = [
-      Object.keys(L.drivers).length ? null : getJSON(`${OPENF1}/drivers?session_key=${k}`),
-      getJSON(`${OPENF1}/position?session_key=${k}${since('date', L.lastPos)}`),
-      isRace ? getJSON(`${OPENF1}/intervals?session_key=${k}${since('date', L.lastInt)}`).catch(() => []) : null,
-      getJSON(`${OPENF1}/laps?session_key=${k}${L.maxLap ? '&lap_number>=' + lapFrom : ''}`),
-      getJSON(`${OPENF1}/stints?session_key=${k}`).catch(() => []),
-      getJSON(`${OPENF1}/race_control?session_key=${k}${since('date', L.lastRc)}`).catch(() => []),
-      getJSON(`${OPENF1}/weather?session_key=${k}${since('date', L.lastWx)}`).catch(() => []),
-    ];
-    const [drv, pos, ints, laps, stints, rc, wx] = await Promise.all(reqs);
-    if (drv) for (const d of drv) L.drivers[d.driver_number] = d;
-    for (const p of pos) L.pos[p.driver_number] = p.position;
-    L.lastPos = maxDate(pos, L.lastPos);
-    if (ints) { for (const i of ints) L.ints[i.driver_number] = i; L.lastInt = maxDate(ints, L.lastInt); }
-    for (const l of laps) {
-      (L.laps[l.driver_number] ||= {})[l.lap_number] = l;
-      if (l.lap_number > L.maxLap) L.maxLap = l.lap_number;
+    if (!Object.keys(L.drivers).length) ok &= await step(async () => { for (const d of await of1(`/drivers?session_key=${k}`)) L.drivers[d.driver_number] = d; });
+
+    if (L.status === 'finished') {
+      // Final classification in one small request
+      ok &= await step(async () => {
+        const res = await of1(`/session_result?session_key=${k}`);
+        if (res.length) { L.result = {}; for (const r of res) { L.result[r.driver_number] = r; if (r.position) L.pos[r.driver_number] = r.position; } }
+      });
     }
-    for (const s of stints) { const cur = L.stints[s.driver_number]; if (!cur || s.stint_number >= cur.stint_number) L.stints[s.driver_number] = s; }
-    if (rc.length) { L.rc.push(...rc); L.lastRc = maxDate(rc, L.lastRc); }
-    if (wx.length) { L.wx = wx[wx.length - 1]; L.lastWx = maxDate(wx, L.lastWx); }
-    S.liveError = null;
+    if (!L.result) {
+      ok &= await step(async () => {
+        const pos = await of1(`/position?session_key=${k}${since('date', L.lastPos)}`);
+        for (const p of pos) L.pos[p.driver_number] = p.position;
+        L.lastPos = maxDate(pos, L.lastPos);
+      });
+      if (isRace && L.status === 'live') ok &= await step(async () => {
+        // Only recent intervals: the full history of a race is several megabytes
+        const from = L.lastInt || new Date(Date.now() - 90e3).toISOString();
+        const ints = await of1(`/intervals?session_key=${k}${since('date', from)}`);
+        for (const i of ints) L.ints[i.driver_number] = i;
+        L.lastInt = maxDate(ints, from);
+      });
+    }
+    ok &= await step(async () => {
+      const lapFrom = Math.max(1, L.maxLap - 1);
+      const laps = await of1(`/laps?session_key=${k}${L.maxLap ? '&lap_number>=' + lapFrom : ''}`);
+      for (const l of laps) { (L.laps[l.driver_number] ||= {})[l.lap_number] = l; if (l.lap_number > L.maxLap) L.maxLap = l.lap_number; }
+    });
+    ok &= await step(async () => {
+      for (const s of await of1(`/stints?session_key=${k}`)) { const cur = L.stints[s.driver_number]; if (!cur || s.stint_number >= cur.stint_number) L.stints[s.driver_number] = s; }
+    });
+    ok &= await step(async () => {
+      const rc = await of1(`/race_control?session_key=${k}${since('date', L.lastRc)}`);
+      if (rc.length) { L.rc.push(...rc); L.lastRc = maxDate(rc, L.lastRc); }
+    });
+    ok &= await step(async () => {
+      const wx = await of1(`/weather?session_key=${k}${since('date', L.lastWx)}`);
+      if (wx.length) { L.wx = wx[wx.length - 1]; L.lastWx = maxDate(wx, L.lastWx); }
+    });
+    S.liveError = ok ? null : 'Some timing data could not be updated. Retrying shortly.';
+    if (ok && L.status === 'finished') L.complete = true;   // final data loaded, no need to fetch it again
   } catch (e) {
-    S.liveError = e.status === 401 || e.status === 403
-      ? 'The free live timing feed is locked while a session is running. Positions appear here a few minutes after the chequered flag.'
-      : 'Could not update live timing. Retrying shortly.';
+    S.liveError = LOCKED_MSG;
   }
   renderLive(); renderWeekend();
 }
@@ -340,7 +383,10 @@ function renderLive() {
     best[n] = b;
   }
   const lapsDone = n => { const ls = Object.values(L.laps[n] || {}); return ls.filter(l => l.lap_duration).length; };
-  const fastest = Math.min(...Object.values(best).filter(Boolean));
+  const lastOf = v => Array.isArray(v) ? [...v].reverse().find(x => x != null) : v;
+  const shown = {};
+  for (const n of Object.keys(L.drivers)) shown[n] = (L.result?.[n] && lastOf(L.result[n].duration)) || best[n];
+  const fastest = Math.min(...Object.values(shown).filter(Boolean));
 
   let nums = Object.keys(L.drivers);
   nums.sort((a, b) => {
@@ -350,22 +396,29 @@ function renderLive() {
     return (best[a] ?? 1e9) - (best[b] ?? 1e9);
   });
 
-  const flag = trackStatus(L.rc);
+  const flag = L.status === 'finished' ? { cls: 'chequered', text: 'Session finished' } : trackStatus(L.rc);
   const wx = L.wx;
   const rows = nums.map((n, i) => {
     const d = L.drivers[n];
     const color = d.team_colour ? '#' + d.team_colour : 'var(--muted)';
     let gap;
-    if (isRace) {
+    const R = L.result?.[n];
+    const out = R && (R.dsq ? 'DSQ' : R.dns ? 'DNS' : R.dnf ? 'DNF' : '');
+    if (R && isRace) {
+      const g = R.gap_to_leader;
+      gap = out ? `<td class="gap">${out}<small>${R.number_of_laps ?? ''} laps</small></td>`
+        : i === 0 ? `<td class="gap">Winner<small>${R.number_of_laps ?? ''} laps</small></td>`
+        : `<td class="gap">${typeof g === 'number' ? '+' + g.toFixed(3) : esc(g ?? '—')}<small>${R.number_of_laps ?? ''} laps</small></td>`;
+    } else if (isRace) {
       const iv = L.ints[n];
       const g = iv?.gap_to_leader, it = iv?.interval;
       const f = v => v == null ? '' : typeof v === 'number' ? '+' + v.toFixed(3) : esc(v);
       gap = i === 0 ? `<td class="gap">Leader<small>${lapsDone(n) ? 'Lap ' + lapsDone(n) : ''}</small></td>`
         : `<td class="gap">${f(g) || '—'}<small>${it != null ? 'Int ' + f(it) : ''}</small></td>`;
     } else {
-      const b = best[n];
-      const delta = b && b !== fastest ? '+' + (b - fastest).toFixed(3) : '';
-      gap = `<td class="gap ${b && b === fastest ? 'fast' : ''}">${fmtLap(b)}<small>${delta}${delta ? ' · ' : ''}${lapsDone(n)} laps</small></td>`;
+      const b = shown[n];
+      const delta = b && b !== fastest && b > fastest ? '+' + (b - fastest).toFixed(3) : '';
+      gap = `<td class="gap ${b && b <= fastest ? 'fast' : ''}">${out || fmtLap(b)}<small>${delta}${delta ? ' · ' : ''}${R?.number_of_laps ?? lapsDone(n)} laps</small></td>`;
     }
     const st = L.stints[n];
     const cmp = st?.compound || '';

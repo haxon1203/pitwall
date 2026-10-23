@@ -1,0 +1,33 @@
+name: Update BBC data
+
+# Every 10 minutes: refresh news, standings, calendar and results from BBC Sport.
+# If a session is about to start or running, the same job keeps going and
+# refreshes the live data every 30 seconds until shortly after it ends.
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['scripts/bbc.mjs', '.github/workflows/bbc.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bbc
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save fast-xml-parser@4.5.0
+      - run: node scripts/bbc.mjs
+        env:
+          PUBLISH_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git

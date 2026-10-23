@@ -1,0 +1,44 @@
+name: Build track replays
+
+# Every 15 minutes: when an F1 session has finished, download OpenF1's free
+# car-position data for it and save a compact replay for the app's track map.
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['scripts/replay.mjs', '.github/workflows/replay.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: replay
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Get existing replays
+        run: |
+          REMOTE="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git clone -q --depth 1 --branch replays "$REMOTE" replays || mkdir -p replays
+          rm -rf replays/.git
+      - run: node scripts/replay.mjs
+        env:
+          OUT_DIR: replays
+      # One commit only, so the branch doesn't grow with every replay
+      - name: Publish to replays branch
+        run: |
+          cd replays
+          git init -q -b replays
+          git add -A
+          git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" commit -qm "Update replays"
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" replays

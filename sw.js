@@ -1,5 +1,5 @@
 // App shell cached for offline start; data always tries the network first.
-const CACHE = 'pitwall-v4';
+const CACHE = 'pitwall-v5';
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
@@ -12,7 +12,7 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return; // live data goes straight to the network
   e.respondWith(
-    fetch(e.request).then(r => {
+    fetch(e.request, { cache: 'no-cache' }).then(r => {
       const copy = r.clone();
       caches.open(CACHE).then(c => c.put(e.request, copy));
       return r;

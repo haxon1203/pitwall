@@ -1,5 +1,5 @@
 // App shell cached for offline start; data always tries the network first.
-const CACHE = 'pitwall-v3';
+const CACHE = 'pitwall-v4';
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

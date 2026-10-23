@@ -92,7 +92,7 @@ function setTab(t) {
   S.tab = t; store.set('tab', t);
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t));
   document.querySelectorAll('.view').forEach(v => v.hidden = v.dataset.view !== t);
-  window.scrollTo(0, 0);
+  document.getElementById('scroller').scrollTop = 0;
   if (t === 'news' && (!S.news || Date.now() - S.news.at > 10 * 60e3)) loadNews();
 }
 document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));

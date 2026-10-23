@@ -1,36 +1,16 @@
 'use strict';
 
-// Data sources (all free, no key, callable from the browser)
-const ERGAST = 'https://api.jolpi.ca/ergast/f1';   // schedule, results, standings
-const OPENF1 = 'https://api.openf1.org/v1';        // timing, race control, weather
-const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url=';
-const ALLORIGINS = 'https://api.allorigins.win/raw?url=';
+// All data comes from BBC Sport, collected by .github/workflows/bbc.yml into the "data" branch.
+const REPO = 'haxon1203/pitwall';
+const LIVE_API = `https://api.github.com/repos/${REPO}/contents/live.json?ref=data`;   // uncached, for live polling
+const RAW = `https://raw.githubusercontent.com/${REPO}/data/`;                          // CDN copy, up to 5 minutes old
 
-const FEEDS = [
-  { id: 'f1', name: 'Formula1.com', url: 'https://www.formula1.com/en/latest/all.xml' },
-  { id: 'motorsport', name: 'Motorsport.com', url: 'https://www.motorsport.com/rss/f1/news/' },
-  { id: 'autosport', name: 'Autosport', url: 'https://www.autosport.com/rss/f1/news/' },
-  { id: 'bbc', name: 'BBC Sport', url: 'https://feeds.bbci.co.uk/sport/formula1/rss.xml' },
-  { id: 'therace', name: 'The Race', url: 'https://www.the-race.com/formula-1/feed/' },
-  { id: 'racefans', name: 'RaceFans', url: 'https://www.racefans.net/feed/' },
+const TEAM_COLORS = [
+  ['red-bull', '#3671C6'], ['ferrari', '#E8002D'], ['mercedes', '#27F4D2'], ['mclaren', '#FF8000'],
+  ['aston', '#229971'], ['alpine', '#FF87BC'], ['williams', '#64C4FF'], ['racing-bulls', '#6692FF'], ['rb', '#6692FF'],
+  ['haas', '#B6BABD'], ['audi', '#BB0A30'], ['sauber', '#52E252'], ['cadillac', '#C8A45C'],
 ];
-// Collected every 15 minutes by .github/workflows/news.yml
-const NEWS_JSON = 'https://raw.githubusercontent.com/haxon1203/pitwall/data/news.json';
-const F1_LIVE_TIMING = 'https://www.formula1.com/en/timing/f1-live';
-
-const TEAM_COLORS = {
-  red_bull: '#3671C6', ferrari: '#E8002D', mercedes: '#27F4D2', mclaren: '#FF8000',
-  aston_martin: '#229971', alpine: '#FF87BC', williams: '#64C4FF', rb: '#6692FF',
-  haas: '#B6BABD', sauber: '#52E252', audi: '#BB0A30', cadillac: '#C8A45C',
-};
-const teamColor = id => TEAM_COLORS[id] || '#8b95a7';
-
-const SESSION_LABELS = {
-  FirstPractice: 'Practice 1', SecondPractice: 'Practice 2', ThirdPractice: 'Practice 3',
-  SprintQualifying: 'Sprint Qualifying', SprintShootout: 'Sprint Shootout',
-  Sprint: 'Sprint', Qualifying: 'Qualifying', Race: 'Grand Prix',
-};
-const SESSION_LENGTH_MIN = { FirstPractice: 60, SecondPractice: 60, ThirdPractice: 60, SprintQualifying: 45, SprintShootout: 45, Sprint: 60, Qualifying: 60, Race: 120 };
+const teamColor = id => (TEAM_COLORS.find(([k]) => (id || '').includes(k)) || [0, '#8b95a7'])[1];
 
 // ---------- helpers ----------
 const $ = s => document.querySelector(s);
@@ -39,27 +19,20 @@ const store = {
   get(k) { try { return JSON.parse(localStorage.getItem('pw:' + k)); } catch { return null; } },
   set(k, v) { try { localStorage.setItem('pw:' + k, JSON.stringify(v)); } catch {} },
 };
-
-async function getJSON(url, { timeout = 15000 } = {}) {
+async function getJSON(url, { timeout = 15000, headers } = {}) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeout);
   try {
-    const r = await fetch(url, { signal: ctl.signal });
+    const r = await fetch(url, { signal: ctl.signal, headers, cache: 'no-cache' });
     if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
     return await r.json();
   } finally { clearTimeout(t); }
 }
-
-const fmtTime = d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-const fmtDay = d => d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
-const fmtShortDate = d => d.toLocaleDateString([], { day: 'numeric', month: 'short' });
-function fmtLap(sec) {
-  if (sec == null || isNaN(sec)) return '—';
-  const m = Math.floor(sec / 60), s = sec - m * 60;
-  return (m ? m + ':' + s.toFixed(3).padStart(6, '0') : s.toFixed(3));
-}
-function ago(d) {
-  const s = Math.round((Date.now() - d) / 1000);
+const fmtTime = d => new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const fmtDay = d => new Date(d).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+const fmtShort = d => new Date(d).toLocaleDateString([], { day: 'numeric', month: 'short' });
+function ago(t) {
+  const s = Math.round((Date.now() - t) / 1000);
   if (s < 60) return 'just now';
   if (s < 3600) return Math.floor(s / 60) + 'm ago';
   if (s < 86400) return Math.floor(s / 3600) + 'h ago';
@@ -68,530 +41,298 @@ function ago(d) {
 function countdown(ms) {
   if (ms <= 0) return '00:00:00';
   const s = Math.floor(ms / 1000), d = Math.floor(s / 86400);
-  const hh = String(Math.floor(s % 86400 / 3600)).padStart(2, '0');
-  const mm = String(Math.floor(s % 3600 / 60)).padStart(2, '0');
-  const ss = String(s % 60).padStart(2, '0');
-  return (d ? d + 'd ' : '') + `${hh}:${mm}:${ss}`;
+  const p = n => String(n).padStart(2, '0');
+  return (d ? d + 'd ' : '') + `${p(Math.floor(s % 86400 / 3600))}:${p(Math.floor(s % 3600 / 60))}:${p(s % 60)}`;
 }
-const toDate = (date, time) => new Date(date + 'T' + (time || '12:00:00Z'));
+const mins = ms => { const m = Math.max(0, Math.round(ms / 60e3)); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`; };
+// "1:35.291" -> seconds
+const secs = t => { if (!t) return null; const p = t.split(':').map(Number); return p.length === 2 ? p[0] * 60 + p[1] : p[0]; };
 
 // ---------- state ----------
 const S = {
   tab: store.get('tab') || 'live',
   standTab: store.get('standTab') || 'drivers',
-  newsSource: store.get('newsSource') || 'all',
-  races: store.get('races') || null,
-  winners: store.get('winners') || {},
-  drivers: store.get('drivers') || null,
-  teams: store.get('teams') || null,
-  last: store.get('last') || null,
-  news: store.get('news') || null,
-  live: null,        // OpenF1 session state
-  liveError: null,
-  updatedAt: null,
+  session: null,                       // session key picked in the timing card
+  bbc: store.get('bbc'),               // news, standings, calendar, last race
+  live: store.get('live'),             // weekend sessions + commentary
+  error: null,
 };
+if (!['drivers', 'teams', 'last'].includes(S.standTab)) S.standTab = 'drivers';
+if (!['live', 'news', 'standings', 'calendar'].includes(S.tab)) S.tab = 'live';
 
 // ---------- tabs ----------
 function setTab(t) {
   S.tab = t; store.set('tab', t);
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t));
   document.querySelectorAll('.view').forEach(v => v.hidden = v.dataset.view !== t);
-  document.getElementById('scroller').scrollTop = 0;
-  if (t === 'news' && (!S.news || Date.now() - (S.news.checked || 0) > 5 * 60e3)) loadNews();
+  $('#scroller').scrollTop = 0;
 }
 document.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
 document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
   S.standTab = b.dataset.st; store.set('standTab', S.standTab); renderStandings();
 }));
 
-// ---------- schedule / weekend ----------
-function raceSessions(race) {
-  const out = [];
-  for (const key of ['FirstPractice', 'SecondPractice', 'ThirdPractice', 'SprintQualifying', 'SprintShootout', 'Sprint', 'Qualifying']) {
-    if (race[key]) out.push({ key, name: SESSION_LABELS[key], start: toDate(race[key].date, race[key].time) });
-  }
-  out.push({ key: 'Race', name: SESSION_LABELS.Race, start: toDate(race.date, race.time) });
-  out.sort((a, b) => a.start - b.start);
-  out.forEach(s => s.end = new Date(+s.start + SESSION_LENGTH_MIN[s.key] * 60e3));
-  return out;
+// ---------- loading ----------
+async function loadBBC() {
+  const j = await getJSON(RAW + 'bbc.json?t=' + Math.floor(Date.now() / 60e3));
+  if (!j.standings && !j.news) throw new Error('empty');
+  S.bbc = j; store.set('bbc', j);
+  renderStandings(); renderCalendar(); renderNews(); renderWeekend();
 }
-function currentRace() {
-  if (!S.races) return null;
-  const now = Date.now();
-  return S.races.find(r => +toDate(r.date, r.time) + 4 * 3600e3 > now) || S.races[S.races.length - 1];
+async function loadLive() {
+  let j;
+  try {
+    // GitHub API: always the newest copy (304 replies don't count towards its hourly limit)
+    j = await getJSON(LIVE_API, { headers: { Accept: 'application/vnd.github.raw+json' } });
+  } catch {
+    j = await getJSON(RAW + 'live.json?t=' + Math.floor(Date.now() / 30e3));
+  }
+  if (!S.live || !(j.at < S.live.at)) { S.live = j; store.set('live', j); }
+  renderWeekend(); renderTiming(); renderCommentary();
 }
 
-async function loadSchedule() {
-  const [sched, wins] = await Promise.all([
-    getJSON(`${ERGAST}/current.json?limit=100`),
-    getJSON(`${ERGAST}/current/results/1.json?limit=100`).catch(() => null),
-  ]);
-  S.races = sched.MRData.RaceTable.Races;
-  store.set('races', S.races);
-  if (wins) {
-    S.winners = {};
-    for (const r of wins.MRData.RaceTable.Races) {
-      const w = r.Results[0];
-      S.winners[r.round] = { name: w.Driver.familyName, code: w.Driver.code, team: w.Constructor.constructorId };
-    }
-    store.set('winners', S.winners);
-  }
-  renderWeekend(); renderCalendar();
+// ---------- weekend ----------
+const sessionState = s => s.isLive ? 'live' : s.status === 'PostEvent' ? 'done' : (s.end && Date.now() > s.end + 30 * 60e3) ? 'done' : 'upcoming';
+function roundInfo(name) {
+  const cal = (S.bbc?.calendar || []).filter(e => !e.cancelled && !e.test);
+  const i = cal.findIndex(e => e.name === name);
+  return i >= 0 ? `Round ${i + 1} of ${cal.length}` : '';
 }
 
 function renderWeekend() {
-  const el = $('#weekend');
-  const race = currentRace();
-  if (!race) return;
-  const sessions = raceSessions(race);
+  const el = $('#weekend'), w = S.live?.weekend;
+  if (!w) return;
   const now = Date.now();
-  const live = sessions.find(s => now >= s.start && now <= s.end);
-  const next = sessions.find(s => s.start > now);
-  const loc = race.Circuit.Location;
-  const isThisWeek = sessions[0].start - now < 5 * 86400e3;
-
-  let cd = '';
+  const sessions = w.sessions;
+  const live = sessions.find(s => s.isLive);
+  const next = sessions.find(s => sessionState(s) === 'upcoming' && s.start > now);
+  let cd;
   if (live) cd = `<div class="countdown"><span class="pill live"><span class="dot"></span>Live now</span><span class="t">${esc(live.name)}</span></div>`;
-  else if (next) cd = `<div class="countdown"><span class="lbl">${esc(next.name)} starts in</span><span class="t" data-countdown="${+next.start}">${countdown(next.start - now)}</span></div>`;
+  else if (next) cd = `<div class="countdown"><span class="lbl">${esc(next.name)} starts in</span><span class="t" data-countdown="${next.start}">${countdown(next.start - now)}</span></div>`;
   else cd = `<div class="countdown"><span class="lbl">Weekend complete</span></div>`;
-
+  const round = roundInfo(w.name);
+  const when = w.status === 'PostEvent' ? 'Last weekend' : sessions[0]?.start - now < 5 * 86400e3 ? 'This weekend' : 'Next up';
   el.innerHTML = `
     <div>
-      <div class="eyebrow">Round ${esc(race.round)} of ${S.races.length} · ${isThisWeek ? 'This weekend' : 'Next up'}</div>
-      <h1>${esc(race.raceName)}</h1>
-      <div class="where">${esc(race.Circuit.circuitName)} · ${esc(loc.locality)}, ${esc(loc.country)}</div>
+      <div class="eyebrow">${esc(round)}${round ? ' · ' : ''}${when}</div>
+      <h1>${esc(w.name)}</h1>
+      <div class="where">${esc(w.circuit)}</div>
     </div>
     ${cd}
     <div class="sessions">
       ${sessions.map(s => {
-        const st = (now >= s.start && now <= s.end) ? 'live' : s === next ? 'next' : s.end < now ? 'done' : '';
-        const label = st === 'live' ? '<span class="dot"></span>Live' : st === 'next' ? 'Next' : st === 'done' ? 'Done' : '';
-        return `<div class="srow"><span class="n">${esc(s.name)}</span><span class="d">${fmtDay(s.start)} · ${fmtTime(s.start)}</span>${label ? `<span class="pill ${st}">${label}</span>` : '<span></span>'}</div>`;
+        const st = sessionState(s);
+        const pill = st === 'live' ? '<span class="pill live"><span class="dot"></span>Live</span>'
+          : s === next ? '<span class="pill next">Next</span>' : st === 'done' ? '<span class="pill done">Done</span>' : '<span></span>';
+        return `<div class="srow"><span class="n">${esc(s.name)}</span><span class="d">${s.start ? fmtDay(s.start) + ' · ' + fmtTime(s.start) : ''}</span>${pill}</div>`;
       }).join('')}
     </div>
     <div class="muted" style="font-size:12px">Times shown in your local time zone.</div>`;
-  $('#liveDot').hidden = !live && !(S.live && S.live.status === 'live');
-  renderNow();
+  $('#liveDot').hidden = !live;
 }
 
-// "Live now" card from the official schedule, shown when a session is running
-// but the free timing feed has no live positions yet.
-function scheduledLive() {
-  const race = currentRace(); if (!race) return null;
-  const now = Date.now();
-  const s = raceSessions(race).find(x => now >= x.start && now <= x.end);
-  return s ? { race, s } : null;
+// ---------- timing (BBC session results, updated live during a session) ----------
+function pickSession(w) {
+  if (S.session && w.sessions.some(s => s.key === S.session)) return w.sessions.find(s => s.key === S.session);
+  return w.sessions.find(s => s.isLive) || w.sessions.filter(s => s.rows?.length).at(-1) || null;
 }
-const hasLiveTiming = () => S.live?.status === 'live' && Object.keys(S.live.pos).length > 0;
-const mins = ms => { const m = Math.max(0, Math.round(ms / 60e3)); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`; };
-function renderNow() {
-  const el = $('#now'), cur = scheduledLive();
-  if (!cur || hasLiveTiming()) { el.hidden = true; el.innerHTML = ''; return; }
-  const { race, s } = cur;
-  el.hidden = false;
+const shortName = s => ({ p1: 'FP1', p2: 'FP2', p3: 'FP3', sq: 'Sprint Quali', sprint: 'Sprint', q: 'Qualifying', race: 'Race' }[s.key] || s.name);
+function row(r, gapCell, extra = '') {
+  return `<tr><td class="p">${esc(r.pos || '–')}</td><td class="bar"><i style="background:${teamColor(r.teamId)}"></i></td>
+    <td class="drv"><b>${esc(r.abbr)}</b><small>${esc(r.name)} · ${esc(r.team)}</small></td>${gapCell}<td class="ex">${extra}</td></tr>`;
+}
+function liveClock(s) {
+  if (!s.start || !s.end) return '';
+  const pct = Math.min(100, Math.max(0, (Date.now() - s.start) / (s.end - s.start) * 100));
+  return `<div class="liveclock"><div class="clock"><span>Running <b data-elapsed="${s.start}">${mins(Date.now() - s.start)}</b></span><span>About <b data-remaining="${s.end}">${mins(s.end - Date.now())}</b> left</span></div>
+    <div class="progress"><i data-progress="${s.start}-${s.end}" style="width:${pct.toFixed(1)}%"></i></div></div>`;
+}
+function renderTiming() {
+  const el = $('#live'), w = S.live?.weekend;
+  if (!w) { el.innerHTML = `<div class="err">${esc(S.error || 'Loading timing…')}</div>`; return; }
+  const ses = pickSession(w);
+  $('#liveHead').textContent = w.sessions.some(s => s.isLive) ? 'Live timing' : 'Session results';
+  const chips = w.sessions.filter(s => s.rows?.length || s.isLive).map(s =>
+    `<button class="chip" data-ses="${s.key}" aria-pressed="${!!ses && s.key === ses.key}">${s.isLive ? '<span class="dot" style="color:var(--live)"></span>' : ''}${esc(shortName(s))}</button>`).join('');
+
+  if (!ses) {
+    const last = S.bbc?.lastRace;
+    el.innerHTML = `<div class="note">No sessions have run yet this weekend. Times appear here as soon as first practice starts.</div>` +
+      (last ? `<div class="note"><b style="color:var(--fg)">Previous round:</b> ${esc(last.name)}, won by ${esc(last.rows[0]?.name)} (${esc(last.rows[0]?.team)}).</div>` : '');
+    return;
+  }
+  const st = sessionState(ses);
+  const pill = st === 'live' ? '<span class="pill live"><span class="dot"></span>Live</span>' : st === 'done' ? '<span class="pill done">Final</span>' : '<span class="pill next">Upcoming</span>';
+  const type = ses.key === 'q' || ses.key === 'sq' ? 'quali' : ses.key === 'race' || ses.key === 'sprint' ? 'race' : 'practice';
+  const rows = ses.rows || [];
+  let body;
+  if (type === 'practice') {
+    const lead = secs(rows[0]?.time);
+    body = rows.map((r, i) => {
+      const t = secs(r.time);
+      const gap = i && t && lead ? '+' + (t - lead).toFixed(3) : '';
+      return row(r, `<td class="gap ${i === 0 && r.time ? 'fast' : ''}">${esc(r.time || '—')}<small>${gap}${gap && r.laps ? ' · ' : ''}${r.laps ? esc(r.laps) + ' laps' : ''}</small></td>`);
+    }).join('');
+  } else if (type === 'quali') {
+    body = rows.map(r => {
+      const part = r.q3 ? 'Q3' : r.q2 ? 'Q2' : r.q1 ? 'Q1' : '';
+      const best = r.q3 || r.q2 || r.q1;
+      const earlier = [r.q1 && part !== 'Q1' && 'Q1 ' + r.q1, r.q2 && part === 'Q3' && 'Q2 ' + r.q2].filter(Boolean).join(' · ');
+      return row(r, `<td class="gap ${r.pos === '1' && best ? 'fast' : ''}">${esc(best || '—')}<small>${part}${earlier ? ' · ' + esc(earlier) : ''}</small></td>`);
+    }).join('');
+  } else {
+    body = rows.map(r => row(r, `<td class="gap">${esc(r.time || '—')}<small>${r.grid ? 'Grid ' + esc(r.grid) : ''}${r.pits ? ' · ' + esc(r.pits) + ' stop' + (r.pits === '1' ? '' : 's') : ''}${r.fl ? ' · <span style="color:var(--purple)">FL</span>' : ''}</small></td>`,
+      r.points && r.points !== '0' ? `<span class="ptsbadge">+${esc(r.points)}</span>` : '')).join('');
+  }
   el.innerHTML = `
-    <div class="row"><span class="pill live"><span class="dot"></span>Live now</span><span class="muted">${esc(race.raceName)}</span></div>
-    <div class="title">${esc(s.name)}</div>
-    <div class="clock"><span>Running <b data-elapsed="${+s.start}">${mins(Date.now() - s.start)}</b></span><span>About <b data-remaining="${+s.end}">${mins(s.end - Date.now())}</b> left</span></div>
-    <div class="progress"><i data-progress="${+s.start}-${+s.end}" style="width:${Math.min(100, (Date.now() - s.start) / (s.end - s.start) * 100).toFixed(1)}%"></i></div>
-    <p>${S.live?.status === 'live' && S.liveError ? esc(S.liveError) : 'The free timing feed sends positions once the session ends, so the full times appear below shortly after the chequered flag.'} For lap-by-lap timing right now, use the official F1 live timing.</p>
-    <a class="btn" href="${F1_LIVE_TIMING}" target="_blank" rel="noopener">Open official F1 live timing</a>`;
+    ${chips ? `<div class="chips sesschips">${chips}</div>` : ''}
+    <div class="livehead">
+      <div class="title">${esc(ses.name)}</div>${pill}
+      <div class="sub">${esc(w.name)}${ses.start ? ' · ' + fmtDay(ses.start) + ' ' + fmtTime(ses.start) : ''}</div>
+    </div>
+    ${st === 'live' ? liveClock(ses) : ''}
+    ${rows.length ? `<div style="overflow-x:auto"><table class="tower">${body}</table></div>`
+      : `<div class="note">${st === 'upcoming' ? 'Times appear here when the session starts.' : 'Waiting for the first times from BBC Sport…'}</div>`}
+    <div class="note">${esc(ses.lastUpdated || '')}${ses.lastUpdated ? ' · ' : ''}From <a href="${esc(w.url)}" target="_blank" rel="noopener">BBC Sport</a>${S.live?.at ? ', collected ' + ago(S.live.at) : ''}</div>`;
 }
+$('#live').addEventListener('click', e => {
+  const b = e.target.closest('[data-ses]'); if (!b) return;
+  S.session = b.dataset.ses; renderTiming();
+});
 
-function renderCalendar() {
-  const el = $('#cal');
-  if (!S.races) return;
-  const cur = currentRace();
-  const now = Date.now();
-  el.innerHTML = S.races.map(r => {
-    const d = toDate(r.date, r.time);
-    const start = new Date(+d - 2 * 86400e3);
-    const past = +d + 4 * 3600e3 < now;
-    const w = S.winners[r.round];
-    const right = w
-      ? `<div class="w"><b style="color:${teamColor(w.team)}">${esc(w.code || w.name)}</b><small>Winner</small></div>`
-      : `<div class="w mono">${fmtShortDate(start)}–${fmtShortDate(d)}</div>`;
-    return `<div class="rnd ${past ? 'past' : ''} ${r === cur ? 'cur' : ''}">
-      <span class="r">R${esc(r.round)}</span>
-      <div style="min-width:0"><b>${esc(r.raceName.replace(' Grand Prix', ' GP'))}${r.Sprint ? '<span class="sprint">SPRINT</span>' : ''}</b><small>${esc(r.Circuit.Location.locality)}, ${esc(r.Circuit.Location.country)}</small></div>
-      ${right}</div>`;
-  }).join('');
+// ---------- BBC live commentary ----------
+function renderCommentary() {
+  const el = $('#rc'), c = S.live?.commentary;
+  const fresh = c && (c.live || (c.updated && Date.now() - c.updated < 18 * 3600e3));
+  $('#rcHead').textContent = c?.live ? 'BBC live commentary' : 'Latest BBC commentary';
+  if (!fresh) {
+    el.innerHTML = `<div class="note">BBC Sport's live text commentary appears here during each session.</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="comhead">
+      <div class="row">${c.live ? '<span class="pill live"><span class="dot"></span>Live</span>' : '<span class="pill done">Ended</span>'}<b>${esc(c.title)}</b></div>
+      ${c.summary?.length ? `<ul>${c.summary.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
+    </div>
+    ${c.posts.map(p => `
+      <article class="post">
+        <time>${p.time ? fmtTime(p.time) : ''}</time>
+        <div>
+          ${p.title ? `<h3>${esc(p.title)}</h3>` : ''}
+          ${p.text.map(t => `<p>${esc(t)}</p>`).join('')}
+          ${p.img ? `<img src="${esc(p.img.src)}" alt="${esc(p.img.alt)}" loading="lazy" onerror="this.remove()">` : ''}
+        </div>
+      </article>`).join('')}
+    <div class="note"><a href="${esc(c.url)}" target="_blank" rel="noopener">Open the full commentary on BBC Sport</a></div>`;
 }
 
 // ---------- standings ----------
-async function loadStandings() {
-  const [d, t, l] = await Promise.all([
-    getJSON(`${ERGAST}/current/driverStandings.json`),
-    getJSON(`${ERGAST}/current/constructorStandings.json`),
-    getJSON(`${ERGAST}/current/last/results.json`),
-  ]);
-  S.drivers = d.MRData.StandingsTable.StandingsLists[0]?.DriverStandings || [];
-  S.teams = t.MRData.StandingsTable.StandingsLists[0]?.ConstructorStandings || [];
-  S.last = l.MRData.RaceTable.Races[0] || null;
-  store.set('drivers', S.drivers); store.set('teams', S.teams); store.set('last', S.last);
-  renderStandings();
-}
-
 function renderStandings() {
   document.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.st === S.standTab));
-  const el = $('#stand');
-  if (S.standTab === 'drivers') {
-    if (!S.drivers) return;
-    const top = +S.drivers[0]?.points || 1;
-    el.innerHTML = S.drivers.map(x => {
-      const c = teamColor(x.Constructors.at(-1)?.constructorId);
-      return `<div class="st"><span class="p">${esc(x.positionText)}</span><span class="c" style="background:${c}"></span>
-        <div class="nm"><b>${esc(x.Driver.givenName)} ${esc(x.Driver.familyName)}</b><small>${esc(x.Constructors.at(-1)?.name)} · ${esc(x.wins)} win${x.wins === '1' ? '' : 's'}</small>
-        <div class="meter"><i style="width:${(+x.points / top * 100).toFixed(1)}%;background:${c}"></i></div></div>
-        <span class="pts">${esc(x.points)}<small>PTS</small></span></div>`;
-    }).join('') || '<div class="note">No standings yet this season.</div>';
-  } else if (S.standTab === 'teams') {
-    if (!S.teams) return;
-    const top = +S.teams[0]?.points || 1;
-    el.innerHTML = S.teams.map(x => {
-      const c = teamColor(x.Constructor.constructorId);
-      return `<div class="st"><span class="p">${esc(x.positionText)}</span><span class="c" style="background:${c}"></span>
-        <div class="nm"><b>${esc(x.Constructor.name)}</b><small>${esc(x.wins)} win${x.wins === '1' ? '' : 's'}</small>
-        <div class="meter"><i style="width:${(+x.points / top * 100).toFixed(1)}%;background:${c}"></i></div></div>
-        <span class="pts">${esc(x.points)}<small>PTS</small></span></div>`;
-    }).join('') || '<div class="note">No standings yet this season.</div>';
+  const el = $('#stand'), st = S.bbc?.standings;
+  const plural = (n, w) => `${esc(n)} ${w}${n === '1' ? '' : 's'}`;
+  const line = (pos, color, name, sub, pts, pct) => `<div class="st"><span class="p">${esc(pos)}</span><span class="c" style="background:${color}"></span>
+    <div class="nm"><b>${esc(name)}</b><small>${sub}</small>${pct != null ? `<div class="meter"><i style="width:${pct.toFixed(1)}%;background:${color}"></i></div>` : ''}</div>
+    <span class="pts">${pts}</span></div>`;
+  if (S.standTab !== 'last') {
+    if (!st) return;
+    const drivers = S.standTab === 'drivers';
+    const list = drivers ? st.drivers : st.teams;
+    const top = +list[0]?.points || 1;
+    el.innerHTML = list.map(x => line(x.pos, teamColor(x.teamId), x.name,
+      `${drivers ? esc(x.team) + ' · ' : ''}${plural(x.wins, 'win')} · ${plural(x.podiums, 'podium')}`,
+      `${esc(x.points)}<small>PTS</small>`, +x.points / top * 100)).join('') +
+      `<div class="note">${esc(st.updated)} · BBC Sport</div>`;
   } else {
-    const r = S.last;
+    const r = S.bbc?.lastRace;
     if (!r) { el.innerHTML = '<div class="note">No race results yet.</div>'; return; }
-    el.innerHTML = `<div class="note"><b style="color:var(--fg)">${esc(r.raceName)}</b> · Round ${esc(r.round)} · ${fmtShortDate(toDate(r.date, r.time))}</div>` +
-      r.Results.map(x => {
-        const c = teamColor(x.Constructor.constructorId);
-        const fl = x.FastestLap?.rank === '1' ? ' · <span style="color:var(--purple)">Fastest lap</span>' : '';
-        const res = x.Time?.time || x.status;
-        return `<div class="st"><span class="p">${esc(x.positionText)}</span><span class="c" style="background:${c}"></span>
-          <div class="nm"><b>${esc(x.Driver.givenName)} ${esc(x.Driver.familyName)}</b><small>${esc(x.Constructor.name)} · ${esc(res)}${fl}</small></div>
-          <span class="pts">${x.points === '0' ? '' : '+' + esc(x.points)}<small>${x.points === '0' ? '' : 'PTS'}</small></span></div>`;
-      }).join('');
+    el.innerHTML = `<div class="note"><b style="color:var(--fg)">${esc(r.name)}</b> · ${esc(r.circuit)}${r.date ? ' · ' + fmtShort(r.date) : ''}</div>` +
+      r.rows.map(x => line(x.pos || '–', teamColor(x.teamId), x.name,
+        `${esc(x.team)}${x.time ? ' · ' + esc(x.time) : ''}${x.grid ? ' · Grid ' + esc(x.grid) : ''}${x.fl ? ' · <span style="color:var(--purple)">Fastest lap</span>' : ''}`,
+        x.points && x.points !== '0' ? `+${esc(x.points)}<small>PTS</small>` : '', null)).join('') +
+      `<div class="note"><a href="${esc(r.url)}" target="_blank" rel="noopener">Full results on BBC Sport</a></div>`;
   }
 }
 
-// ---------- live timing (OpenF1) ----------
-function newLiveState(session) {
-  return { session, key: session.session_key, drivers: {}, pos: {}, ints: {}, laps: {}, stints: {}, rc: [], wx: null,
-           lastPos: null, lastInt: null, lastRc: null, lastWx: null, maxLap: 0, status: 'upcoming' };
-}
-const maxDate = (rows, cur) => rows.reduce((m, r) => (r.date > m ? r.date : m), cur || '');
-const since = (field, d) => d ? `&${field}>${encodeURIComponent(d)}` : '';
-
-// OpenF1 free tier allows ~3 requests/second, so calls go out one at a time with a gap,
-// and a "too many requests" answer is retried after a pause.
-let of1Chain = Promise.resolve();
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-function of1(path) {
-  const run = async () => {
-    for (let attempt = 0; ; attempt++) {
-      try { const j = await getJSON(OPENF1 + path); await sleep(400); return j; }
-      catch (e) {
-        if (e.status === 404) { await sleep(400); return []; }   // OpenF1 answers 404 when there are no rows
-        if (e.status !== 429 || attempt >= 3) { await sleep(400); throw e; }
-        await sleep(1500 * (attempt + 1));
-      }
-    }
-  };
-  const p = of1Chain.then(run, run);
-  of1Chain = p.catch(() => {});
-  return p;
-}
-const LOCKED_MSG = 'The free live timing feed is locked while a session is running. Positions appear here a few minutes after the chequered flag.';
-
-let liveLoading = false;
-async function loadLive() {
-  if (liveLoading) return; liveLoading = true;
-  try { await loadLiveInner(); } finally { liveLoading = false; }
-}
-async function loadLiveInner() {
-  let session;
-  try {
-    [session] = await of1(`/sessions?session_key=latest`);
-  } catch (e) {
-    S.liveError = e.status === 401 || e.status === 403 ? LOCKED_MSG : 'Live timing is unavailable right now. Tap refresh in a moment.';
-    renderLive(); return;
-  }
-  if (!session) return;
-  if (!S.live || S.live.key !== session.session_key) {
-    S.live = newLiveState(session);
-    const [meeting] = await of1(`/meetings?meeting_key=${session.meeting_key}`).catch(() => []);
-    S.live.meeting = meeting;
-  }
-  const L = S.live, k = L.key;
-  L.session = session;
-  const now = Date.now(), start = Date.parse(session.date_start), end = Date.parse(session.date_end);
-  L.status = now < start ? 'upcoming' : now <= end + 10 * 60e3 ? 'live' : 'finished';
-  if (L.status === 'upcoming' || L.complete) { renderLive(); renderWeekend(); return; }
-
-  const isRace = /race/i.test(session.session_type);
-  const step = async (fn) => { try { await fn(); return true; } catch (e) { if (e.status === 401 || e.status === 403) throw e; return false; } };
-  let ok = true;
-  try {
-    if (!Object.keys(L.drivers).length) ok &= await step(async () => { for (const d of await of1(`/drivers?session_key=${k}`)) L.drivers[d.driver_number] = d; });
-
-    if (L.status === 'finished') {
-      // Final classification in one small request
-      ok &= await step(async () => {
-        const res = await of1(`/session_result?session_key=${k}`);
-        if (res.length) { L.result = {}; for (const r of res) { L.result[r.driver_number] = r; if (r.position) L.pos[r.driver_number] = r.position; } }
-      });
-    }
-    if (!L.result) {
-      ok &= await step(async () => {
-        const pos = await of1(`/position?session_key=${k}${since('date', L.lastPos)}`);
-        for (const p of pos) L.pos[p.driver_number] = p.position;
-        L.lastPos = maxDate(pos, L.lastPos);
-      });
-      if (isRace && L.status === 'live') ok &= await step(async () => {
-        // Only recent intervals: the full history of a race is several megabytes
-        const from = L.lastInt || new Date(Date.now() - 90e3).toISOString();
-        const ints = await of1(`/intervals?session_key=${k}${since('date', from)}`);
-        for (const i of ints) L.ints[i.driver_number] = i;
-        L.lastInt = maxDate(ints, from);
-      });
-    }
-    ok &= await step(async () => {
-      const lapFrom = Math.max(1, L.maxLap - 1);
-      const laps = await of1(`/laps?session_key=${k}${L.maxLap ? '&lap_number>=' + lapFrom : ''}`);
-      for (const l of laps) { (L.laps[l.driver_number] ||= {})[l.lap_number] = l; if (l.lap_number > L.maxLap) L.maxLap = l.lap_number; }
-    });
-    ok &= await step(async () => {
-      for (const s of await of1(`/stints?session_key=${k}`)) { const cur = L.stints[s.driver_number]; if (!cur || s.stint_number >= cur.stint_number) L.stints[s.driver_number] = s; }
-    });
-    ok &= await step(async () => {
-      const rc = await of1(`/race_control?session_key=${k}${since('date', L.lastRc)}`);
-      if (rc.length) { L.rc.push(...rc); L.lastRc = maxDate(rc, L.lastRc); }
-    });
-    ok &= await step(async () => {
-      const wx = await of1(`/weather?session_key=${k}${since('date', L.lastWx)}`);
-      if (wx.length) { L.wx = wx[wx.length - 1]; L.lastWx = maxDate(wx, L.lastWx); }
-    });
-    S.liveError = ok ? null : 'Some timing data could not be updated. Retrying shortly.';
-    if (ok && L.status === 'finished') L.complete = true;   // final data loaded, no need to fetch it again
-  } catch (e) {
-    S.liveError = LOCKED_MSG;
-  }
-  renderLive(); renderWeekend();
-}
-
-function trackStatus(rc) {
-  let s = { cls: 'green', text: 'Track clear' };
-  for (const m of rc) {
-    const msg = (m.message || '').toUpperCase();
-    if (m.category === 'SafetyCar') {
-      if (msg.includes('VIRTUAL SAFETY CAR DEPLOYED')) s = { cls: 'vsc', text: 'Virtual Safety Car' };
-      else if (msg.includes('SAFETY CAR DEPLOYED')) s = { cls: 'sc', text: 'Safety Car' };
-    } else if (m.category === 'Flag' && (m.scope === 'Track' || !m.scope)) {
-      if (m.flag === 'RED') s = { cls: 'red', text: 'Red flag' };
-      else if (m.flag === 'GREEN' || m.flag === 'CLEAR') s = { cls: 'green', text: 'Green flag' };
-      else if (m.flag === 'CHEQUERED') s = { cls: 'chequered', text: 'Chequered flag' };
-    }
-  }
-  return s;
-}
-
-function renderLive() {
-  const el = $('#live'), rcEl = $('#rc');
-  const L = S.live;
-  if (!L) {
-    el.innerHTML = `<div class="err">${esc(S.liveError || 'Loading live timing…')}</div>`;
-    return;
-  }
-  const ses = L.session, isRace = /race/i.test(ses.session_type);
-  const start = new Date(ses.date_start);
-  const meetingName = L.meeting?.meeting_name || ses.country_name;
-  const race = currentRace();
-  let thisWeekend = false;
-  if (race) { const ss = raceSessions(race); thisWeekend = +start >= ss[0].start - 86400e3 && +start <= +ss.at(-1).end + 86400e3; }
-  $('#liveHead').textContent = L.status === 'live' ? 'Live timing' : thisWeekend ? 'Latest session result' : 'Previous round result';
-  const statusPill = L.status === 'live' ? '<span class="pill live"><span class="dot"></span>Live</span>'
-    : L.status === 'finished' ? '<span class="pill done">Final</span>' : '<span class="pill next">Upcoming</span>';
-
-  // best laps
-  const best = {};
-  for (const [n, laps] of Object.entries(L.laps)) {
-    let b = null;
-    for (const l of Object.values(laps)) if (l.lap_duration && !l.is_pit_out_lap && (b == null || l.lap_duration < b)) b = l.lap_duration;
-    best[n] = b;
-  }
-  const lapsDone = n => { const ls = Object.values(L.laps[n] || {}); return ls.filter(l => l.lap_duration).length; };
-  const lastOf = v => Array.isArray(v) ? [...v].reverse().find(x => x != null) : v;
-  const shown = {};
-  for (const n of Object.keys(L.drivers)) shown[n] = (L.result?.[n] && lastOf(L.result[n].duration)) || best[n];
-  const fastest = Math.min(...Object.values(shown).filter(Boolean));
-
-  let nums = Object.keys(L.drivers);
-  nums.sort((a, b) => {
-    const pa = L.pos[a], pb = L.pos[b];
-    if (pa && pb) return pa - pb;
-    if (pa || pb) return pa ? -1 : 1;
-    return (best[a] ?? 1e9) - (best[b] ?? 1e9);
-  });
-
-  const flag = L.status === 'finished' ? { cls: 'chequered', text: 'Session finished' } : trackStatus(L.rc);
-  const wx = L.wx;
-  const rows = nums.map((n, i) => {
-    const d = L.drivers[n];
-    const color = d.team_colour ? '#' + d.team_colour : 'var(--muted)';
-    let gap;
-    const R = L.result?.[n];
-    const out = R && (R.dsq ? 'DSQ' : R.dns ? 'DNS' : R.dnf ? 'DNF' : '');
-    if (R && isRace) {
-      const g = R.gap_to_leader;
-      gap = out ? `<td class="gap">${out}<small>${R.number_of_laps ?? ''} laps</small></td>`
-        : i === 0 ? `<td class="gap">Winner<small>${R.number_of_laps ?? ''} laps</small></td>`
-        : `<td class="gap">${typeof g === 'number' ? '+' + g.toFixed(3) : esc(g ?? '—')}<small>${R.number_of_laps ?? ''} laps</small></td>`;
-    } else if (isRace) {
-      const iv = L.ints[n];
-      const g = iv?.gap_to_leader, it = iv?.interval;
-      const f = v => v == null ? '' : typeof v === 'number' ? '+' + v.toFixed(3) : esc(v);
-      gap = i === 0 ? `<td class="gap">Leader<small>${lapsDone(n) ? 'Lap ' + lapsDone(n) : ''}</small></td>`
-        : `<td class="gap">${f(g) || '—'}<small>${it != null ? 'Int ' + f(it) : ''}</small></td>`;
-    } else {
-      const b = shown[n];
-      const delta = b && b !== fastest && b > fastest ? '+' + (b - fastest).toFixed(3) : '';
-      gap = `<td class="gap ${b && b <= fastest ? 'fast' : ''}">${out || fmtLap(b)}<small>${delta}${delta ? ' · ' : ''}${R?.number_of_laps ?? lapsDone(n)} laps</small></td>`;
-    }
-    const st = L.stints[n];
-    const cmp = st?.compound || '';
-    const tyre = cmp ? `<span class="tyre ${esc(cmp)}" title="${esc(cmp)}">${esc(cmp[0])}</span>` : '';
-    return `<tr><td class="p">${L.pos[n] || i + 1}</td><td class="bar"><i style="background:${color}"></i></td>
-      <td class="drv"><b>${esc(d.name_acronym)}</b><small>${esc(d.full_name ? d.full_name.split(' ').map(w => w[0] + w.slice(1).toLowerCase()).join(' ') : '')} · ${esc(d.team_name || '')}</small></td>
-      ${gap}<td style="width:30px">${tyre}</td></tr>`;
-  }).join('');
-
-  el.innerHTML = `
-    <div class="livehead">
-      <div class="title">${esc(ses.session_name)}</div>${statusPill}
-      <div class="sub">${esc(meetingName)} · ${esc(ses.circuit_short_name)} · ${fmtDay(start)} ${fmtTime(start)}</div>
-    </div>
-    ${L.status !== 'upcoming' ? `<div class="flag ${flag.cls}"><span>${flag.text}</span>${isRace && L.maxLap ? `<span class="lap">LAP ${L.maxLap}</span>` : ''}</div>` : ''}
-    ${wx ? `<div class="wx"><span>Air <b>${wx.air_temperature}°C</b></span><span>Track <b>${wx.track_temperature}°C</b></span><span>Humidity <b>${wx.humidity}%</b></span><span>Wind <b>${wx.wind_speed} m/s</b></span><span>${wx.rainfall ? '<b style="color:var(--vsc)">Rain</b>' : 'Dry'}</span></div>` : ''}
-    ${S.liveError ? `<div class="note">${esc(S.liveError)}</div>` : ''}
-    ${rows ? `<div style="overflow-x:auto"><table class="tower">${rows}</table></div>`
-      : `<div class="note">${L.status === 'upcoming' ? 'Timing appears when the session starts.' : 'Waiting for timing data…'}</div>`}`;
-
-  const msgs = L.rc.slice(-20).reverse();
-  rcEl.innerHTML = msgs.length
-    ? msgs.map(m => `<div><time>${fmtTime(new Date(m.date))}</time><span>${m.lap_number ? `<b class="mono">L${m.lap_number}</b> ` : ''}${esc(m.message)}</span></div>`).join('')
-    : '<div class="note">No race control messages for this session yet.</div>';
+// ---------- calendar ----------
+function renderCalendar() {
+  const el = $('#cal'), cal = S.bbc?.calendar;
+  if (!cal?.length) return;
+  const current = cal.find(e => !e.cancelled && !e.test && e.status !== 'PostEvent');
+  let n = 0;
+  el.innerHTML = cal.map(e => {
+    const counted = !e.cancelled && !e.test;
+    if (counted) n++;
+    const right = e.cancelled ? '<div class="w muted">Cancelled</div>' : e.test ? '<div class="w muted">Testing</div>'
+      : e.winner ? `<div class="w"><b style="color:${teamColor(e.winner.teamId)}">${esc(e.winner.abbr)}</b><small>Winner</small></div>`
+      : `<div class="w mono">${fmtShort(e.start)}–${fmtShort(e.end)}</div>`;
+    return `<div class="rnd ${e.status === 'PostEvent' || e.cancelled ? 'past' : ''} ${e === current ? 'cur' : ''}">
+      <span class="r">${counted ? 'R' + n : ''}</span>
+      <div style="min-width:0"><b>${esc(e.name.replace(' Grand Prix', ' GP'))}</b><small>${esc(e.venue)}</small></div>${right}</div>`;
+  }).join('') + `<div class="note">Calendar from BBC Sport</div>`;
 }
 
 // ---------- news ----------
-function parseRSS(xml, feed) {
-  const doc = new DOMParser().parseFromString(xml, 'text/xml');
-  return [...doc.querySelectorAll('item')].slice(0, 20).map(it => {
-    const q = s => it.querySelector(s)?.textContent?.trim() || '';
-    const media = it.getElementsByTagName('media:content')[0] || it.getElementsByTagName('media:thumbnail')[0] || it.querySelector('enclosure');
-    return { title: q('title'), link: q('link'), date: Date.parse(q('pubDate')) || 0, img: media?.getAttribute('url') || '',
-             desc: stripHTML(q('description')), source: feed.id };
-  });
-}
-function stripHTML(h) { const d = document.createElement('div'); d.innerHTML = h; return (d.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 220); }
-
-async function loadFeed(feed) {
-  try {
-    const j = await getJSON(RSS2JSON + encodeURIComponent(feed.url), { timeout: 10000 });
-    if (j.status !== 'ok') throw new Error(j.message);
-    return j.items.map(i => ({
-      title: i.title, link: i.link, date: Date.parse(i.pubDate.replace(' ', 'T') + 'Z') || 0,
-      img: i.thumbnail || i.enclosure?.link || '', desc: stripHTML(i.description || ''), source: feed.id,
-    }));
-  } catch {
-    const r = await fetch(ALLORIGINS + encodeURIComponent(feed.url));
-    if (!r.ok) throw new Error('feed failed');
-    return parseRSS(await r.text(), feed);
-  }
-}
-
-let newsLoading = false;
-async function loadNews() {
-  if (newsLoading) return; newsLoading = true;
-  try {
-    let fresh = null;
-    try {
-      const j = await getJSON(NEWS_JSON + '?t=' + Math.floor(Date.now() / 60e3), { timeout: 10000 });
-      if (j.items?.length && Date.now() - j.at < 3 * 3600e3) fresh = j;
-    } catch {}
-    if (!fresh) {
-      // Backup: fetch the feeds from the phone if the collected file is missing or stale
-      const results = await Promise.allSettled(FEEDS.map(loadFeed));
-      const items = results.flatMap(r => r.status === 'fulfilled' ? r.value : []);
-      if (!items.length) throw new Error('no news');
-      const seen = new Set();
-      fresh = { at: Date.now(), items: items.filter(i => i.title && i.link && !seen.has(i.title.toLowerCase()) && seen.add(i.title.toLowerCase()))
-        .sort((a, b) => b.date - a.date).slice(0, 120) };
-    }
-    S.news = { ...fresh, checked: Date.now() };
-    store.set('news', S.news);
-  } catch {
-    if (!S.news) $('#news').innerHTML = '<div class="err">Could not load news right now. Tap refresh to try again.</div>';
-  } finally { newsLoading = false; renderNews(); }
-}
-
 function renderNews() {
-  const chips = [{ id: 'all', name: 'All' }, ...FEEDS];
-  $('#newsChips').innerHTML = chips.map(c => `<button class="chip" data-src="${c.id}" aria-pressed="${S.newsSource === c.id}">${esc(c.name)}</button>`).join('');
-  if (!S.news) return;
-  const items = S.news.items.filter(i => S.newsSource === 'all' || i.source === S.newsSource);
-  const name = id => FEEDS.find(f => f.id === id)?.name || '';
-  $('#news').innerHTML = `<div class="newsAge">${items.length} stories · collected ${ago(S.news.at)}</div>` + (items.length ? items.map(i => `
+  const items = S.bbc?.news;
+  if (!items) return;
+  $('#news').innerHTML = `<div class="newsAge">BBC Sport · ${items.length} stories · collected ${ago(S.bbc.at)}</div>` + (items.length ? items.map(i => `
     <a class="card story ${i.img ? '' : 'noimg'}" href="${esc(i.link)}" target="_blank" rel="noopener">
       <div style="min-width:0"><h3>${esc(i.title)}</h3>${i.desc ? `<p>${esc(i.desc)}</p>` : ''}
-        <div class="meta"><b>${esc(name(i.source))}</b><span>·</span><span>${i.date ? ago(i.date) : ''}</span></div></div>
-      ${i.img ? `<img src="${esc(i.img)}" alt="" loading="lazy" onerror="this.remove();this.parentNode&&this.parentNode.classList.add('noimg')">` : ''}
-    </a>`).join('') : '<div class="note">No stories from this source right now.</div>');
+        <div class="meta"><span>${i.date ? ago(i.date) : ''}</span></div></div>
+      ${i.img ? `<img src="${esc(i.img)}" alt="" loading="lazy" onerror="this.parentNode.classList.add('noimg');this.remove()">` : ''}
+    </a>`).join('') : '<div class="note">No stories right now.</div>');
 }
-$('#newsChips').addEventListener('click', e => {
-  const b = e.target.closest('.chip'); if (!b) return;
-  S.newsSource = b.dataset.src; store.set('newsSource', S.newsSource); renderNews();
-});
 
-// ---------- refresh loop ----------
-function stamp() {
-  S.updatedAt = Date.now();
-  $('#updated').textContent = 'Updated ' + fmtTime(new Date());
+// ---------- refresh ----------
+function stamp(ok) {
+  $('#updated').textContent = ok ? 'Updated ' + fmtTime(Date.now()) : navigator.onLine ? 'Could not reach data' : 'Offline';
 }
+let lastFull = 0;
 async function refreshAll() {
   const btn = $('#refresh'); btn.classList.add('spin');
-  const jobs = [loadSchedule(), loadStandings(), loadLive()];
-  if (S.tab === 'news') jobs.push(loadNews());
-  const res = await Promise.allSettled(jobs);
+  const res = await Promise.allSettled([loadBBC(), loadLive()]);
   btn.classList.remove('spin');
-  if (res.every(r => r.status === 'rejected')) $('#updated').textContent = navigator.onLine ? 'Could not reach data' : 'Offline';
-  else stamp();
+  lastFull = Date.now();
+  S.error = res.every(r => r.status === 'rejected') ? 'Could not load data from BBC Sport. Tap refresh to try again.' : null;
+  if (S.error && !S.live) renderTiming();
+  stamp(!S.error);
 }
 $('#refresh').addEventListener('click', refreshAll);
 
-// live polling: fast while a session runs, slow otherwise
-let liveTimer;
-function scheduleLive() {
-  clearTimeout(liveTimer);
-  const fast = S.live?.status === 'live';
-  liveTimer = setTimeout(async () => {
-    if (document.visibilityState === 'visible') { await loadLive(); stamp(); }
-    scheduleLive();
-  }, fast ? 8000 : 120000);
+// Poll often while a session is live or about to start, slowly otherwise
+const isHot = () => {
+  const w = S.live?.weekend, now = Date.now();
+  return !!w && w.sessions.some(s => s.isLive || (s.start && now > s.start - 15 * 60e3 && now < s.end + 20 * 60e3));
+};
+let timer;
+function schedule() {
+  clearTimeout(timer);
+  timer = setTimeout(async () => {
+    if (document.visibilityState === 'visible') {
+      try { await loadLive(); stamp(true); } catch { stamp(false); }
+      if (Date.now() - lastFull > 10 * 60e3) refreshAll();
+    }
+    schedule();
+  }, isHot() ? 45e3 : 3 * 60e3);
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && S.updatedAt && Date.now() - S.updatedAt > 60e3) refreshAll();
+  if (document.visibilityState === 'visible' && Date.now() - lastFull > 60e3) refreshAll();
 });
 setInterval(() => {
   const n = Date.now();
   document.querySelectorAll('[data-elapsed]').forEach(el => el.textContent = mins(n - el.dataset.elapsed));
-  document.querySelectorAll('[data-remaining]').forEach(el => { if (n > +el.dataset.remaining) renderWeekend(); else el.textContent = mins(el.dataset.remaining - n); });
+  document.querySelectorAll('[data-remaining]').forEach(el => el.textContent = mins(el.dataset.remaining - n));
   document.querySelectorAll('[data-progress]').forEach(el => { const [a, b] = el.dataset.progress.split('-').map(Number); el.style.width = Math.min(100, (n - a) / (b - a) * 100).toFixed(1) + '%'; });
   document.querySelectorAll('[data-countdown]').forEach(el => {
-    const ms = +el.dataset.countdown - Date.now();
+    const ms = +el.dataset.countdown - n;
     if (ms <= 0) renderWeekend(); else el.textContent = countdown(ms);
   });
 }, 1000);
 
 // ---------- boot ----------
 setTab(S.tab);
-if (S.races) { renderWeekend(); renderCalendar(); }
-renderStandings(); renderNews();
-refreshAll().then(scheduleLive);
+renderWeekend(); renderTiming(); renderCommentary(); renderStandings(); renderCalendar(); renderNews();
+refreshAll().then(schedule);
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

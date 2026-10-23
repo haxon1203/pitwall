@@ -166,10 +166,12 @@ async function calendar(season) {
   }
   const seen = new Set();
   return events.filter(e => !seen.has(e.eventUrn) && seen.add(e.eventUrn)).map(e => {
-    const stage = season.stages.find(s => s.heading.toLowerCase().startsWith(e.eventName.toLowerCase()));
+    // Match on name and race date: a cancelled race can reappear later in the season under the same name
+    const inWindow = t => t >= Date.parse(e.startDate) - 86400e3 && t <= Date.parse(e.endDate) + 2 * 86400e3;
+    const stage = e.isCancelled ? null : season.stages.find(s => s.heading.toLowerCase().startsWith(e.eventName.toLowerCase()) && inWindow(Date.parse(s.raceDateTime)));
     const w = stage?.result?.participants?.find(p => clean(p.rank) === '1');
     return {
-      name: e.eventName, venue: e.venueName, start: e.startDate, end: e.endDate, cancelled: !!e.isCancelled,
+      name: e.eventName, venue: e.venueName, start: e.startDate, end: e.endDate, cancelled: !!e.isCancelled, test: /\btest/i.test(e.eventName),
       status: stage?.status || (Date.parse(e.endDate) + 86400e3 < Date.now() ? 'PostEvent' : 'PreEvent'),
       winner: w ? { name: w.fullName, abbr: w.abbreviatedName, teamId: teamId(w.team?.urn) } : null,
     };

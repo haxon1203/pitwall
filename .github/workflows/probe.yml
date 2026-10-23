@@ -1,0 +1,25 @@
+name: Probe BBC pages
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/probe.yml']
+permissions:
+  contents: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir out && cd out
+          UA='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+          get(){ curl -sSL -A "$UA" -o "$1" -w "$1 %{http_code} %{size_download} %{url_effective}\n" "$2" >> index.txt || echo "$1 failed" >> index.txt; }
+          get home.html https://www.bbc.co.uk/sport/formula1
+          get drivers.html https://www.bbc.co.uk/sport/formula1/drivers-world-championship/standings
+          get teams.html https://www.bbc.co.uk/sport/formula1/constructors-world-championship/standings
+          get results.html https://www.bbc.co.uk/sport/formula1/results
+          get calendar.html https://www.bbc.co.uk/sport/formula1/calendar
+          get calendar2026.html https://www.bbc.co.uk/sport/formula1/calendar/2026
+          cat index.txt
+          git init -q -b probe && git add -A
+          git -c user.name=gha -c user.email=gha@users.noreply.github.com commit -qm probe
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" probe

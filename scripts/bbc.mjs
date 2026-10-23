@@ -258,17 +258,23 @@ const inLiveWindow = wk => {
   return !!wk && (wk.isLive || wk.sessions.some(s => s.isLive || (s.start && now >= s.start - 10 * 60e3 && now <= s.end + 30 * 60e3)));
 };
 
+async function fullUpdate(season) {
+  const [st, cal, nw] = await Promise.allSettled([standings(), calendar(season), news()]);
+  for (const [n, r] of [['standings', st], ['calendar', cal], ['news', nw]]) if (r.status === 'rejected') console.warn(n + ':', r.reason.message);
+  write('bbc.json', {
+    at: Date.now(), season: season.year,
+    standings: st.value || null, calendar: cal.value || [], news: nw.value || [], lastRace: lastRace(season),
+  });
+  return { stories: nw.value?.length ?? 0, events: cal.value?.length ?? 0 };
+}
+
 const season = await seasonResults();
-const [st, cal, nw] = await Promise.allSettled([standings(), calendar(season), news()]);
-for (const [n, r] of [['standings', st], ['calendar', cal], ['news', nw]]) if (r.status === 'rejected') console.warn(n + ':', r.reason.message);
-write('bbc.json', {
-  at: Date.now(), season: season.year,
-  standings: st.value || null, calendar: cal.value || [], news: nw.value || [], lastRace: lastRace(season),
-});
+const counts = await fullUpdate(season);
+let lastFull = Date.now();
 let live = await liveSnapshot(season);
 write('live.json', live);
 publish('Update BBC data');
-console.log(`Published: ${nw.value?.length ?? 0} stories, ${cal.value?.length ?? 0} events, weekend ${live.weekend?.name} (${live.weekend?.sessions.map(s => s.key + ':' + s.status).join(' ')}), commentary "${live.commentary?.title}" live=${live.commentary?.live}`);
+console.log(`Published: ${counts.stories} stories, ${counts.events} events, weekend ${live.weekend?.name} (${live.weekend?.sessions.map(s => s.key + ':' + s.status).join(' ')}), commentary "${live.commentary?.title}" live=${live.commentary?.live}`);
 
 // Keep refreshing while a session is on
 let lastJson = JSON.stringify({ ...live, at: 0 });
@@ -277,7 +283,10 @@ while (inLiveWindow(live.weekend) && Date.now() - started < MAX_RUN_MS && PUBLIS
   try {
     const s = await seasonResults();
     live = await liveSnapshot(s);
+    let full = false;
+    if (Date.now() - lastFull > 10 * 60e3) { await fullUpdate(s); lastFull = Date.now(); full = true; }   // news and standings keep updating during long sessions
     const j = JSON.stringify({ ...live, at: 0 });
+    if (full && j === lastJson) publish('Update BBC data');
     if (j !== lastJson) {
       write('live.json', live); publish('Live update'); lastJson = j;
       const cur = live.weekend?.sessions.find(x => x.isLive);

@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --no-save ws@8.18.0
+      - run: echo no deps
       - run: node scripts/f1probe.mjs
       - run: |
           cd out && git init -q -b probe && git add f1probe.txt
